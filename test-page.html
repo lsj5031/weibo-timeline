@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Weibo Timeline Script Tester</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         :root {
             /* Color Design Tokens */
@@ -25,8 +28,8 @@
             --color-shadow-dark: rgba(15,23,42,0.6);
             
             /* Typography Design Tokens */
-            --font-family-base: 'Inter', 'Roboto', 'Segoe UI', Arial, sans-serif;
-            --font-family-mono: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            --font-family-base: 'Space Grotesk', 'Bricolage Grotesque', 'IBM Plex Sans', sans-serif;
+            --font-family-mono: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace;
             --font-size-h1: 48px;
             --font-size-h2: 32px;
             --font-size-body: 16px;
@@ -35,7 +38,7 @@
             --font-weight-bold: 700;
             --font-weight-semibold: 600;
             --font-weight-medium: 500;
-            --font-weight-regular: 400;
+            --font-weight-regular: 300;
             --line-height-heading: 1.2;
             --line-height-body: 1.5;
             --letter-spacing: 0.1px;
@@ -64,6 +67,17 @@
             margin: 0 auto;
             padding: var(--spacing-lg);
             background: var(--color-secondary);
+            font-weight: var(--font-weight-regular);
+        }
+        
+        h1 {
+            font-weight: var(--font-weight-bold);
+            letter-spacing: -0.02em;
+        }
+        
+        h2 {
+            font-weight: var(--font-weight-semibold);
+            letter-spacing: -0.01em;
         }
         .container {
             background: var(--color-background);
@@ -86,6 +100,8 @@
             color: var(--color-background);
             cursor: pointer;
             font-size: var(--font-size-body);
+            font-weight: var(--font-weight-medium);
+            letter-spacing: 0.01em;
         }
         button:hover {
             background: #1d4ed8;

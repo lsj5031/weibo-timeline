@@ -377,6 +377,9 @@
 <head>
   <meta charset="utf-8">
   <title>Weibo Timeline</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       /* Color Design Tokens */
@@ -398,8 +401,8 @@
       --color-shadow-dark: rgba(15,23,42,0.6);
       
       /* Typography Design Tokens */
-      --font-family-base: 'Inter', 'Roboto', 'Segoe UI', Arial, sans-serif;
-      --font-family-mono: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --font-family-base: 'Space Grotesk', 'Bricolage Grotesque', 'IBM Plex Sans', sans-serif;
+      --font-family-mono: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace;
       --font-size-h1: 48px;
       --font-size-h2: 32px;
       --font-size-body: 16px;
@@ -408,7 +411,7 @@
       --font-weight-bold: 700;
       --font-weight-semibold: 600;
       --font-weight-medium: 500;
-      --font-weight-regular: 400;
+      --font-weight-regular: 300;
       --line-height-heading: 1.2;
       --line-height-body: 1.5;
       --letter-spacing: 0.1px;
@@ -486,8 +489,9 @@
     h1{
       margin:0 0 var(--spacing-xs) 0;
       font-size:20px;
-      font-weight:var(--font-weight-semibold);
+      font-weight:var(--font-weight-bold);
       color:var(--color-primary-dark);
+      letter-spacing: -0.02em;
     }
     .subtitle{
       font-size:12px;
@@ -541,6 +545,8 @@
       max-height:140px;
       overflow:auto;
       border:1px solid rgba(148,163,184,0.3);
+      font-weight:400;
+      letter-spacing: 0.01em;
     }
     #log .line{
       padding:1px 0;
@@ -576,7 +582,7 @@
       flex-wrap:wrap;
     }
     .meta .name{
-      font-weight:var(--font-weight-medium);
+      font-weight:var(--font-weight-semibold);
       color:var(--color-primary-dark);
     }
     .meta .dot{
@@ -587,6 +593,7 @@
       line-height:var(--line-height-body);
       color:var(--color-primary-dark);
       margin-bottom:var(--spacing-sm);
+      font-weight:var(--font-weight-regular);
     }
     .actions{
       display:flex;
@@ -600,6 +607,8 @@
       text-decoration:none;
       color:#bfdbfe;
       background:rgba(37,99,235,0.1);
+      font-weight:var(--font-weight-medium);
+      letter-spacing: 0.01em;
       transition:all 0.2s;
     }
     .actions a:hover{
@@ -627,6 +636,8 @@
       color:var(--color-primary-dark);
       cursor:pointer;
       font-size:var(--font-size-xs);
+      font-weight:var(--font-weight-medium);
+      letter-spacing: 0.01em;
       transition:all 0.2s;
     }
     .controls button:hover{
