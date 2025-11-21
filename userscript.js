@@ -135,6 +135,9 @@
 
   // LocalStorage key for the merged timeline
   const TIMELINE_KEY = "weibo_timeline_v2";
+  
+  // LocalStorage key for tracking last processed UID
+  const LAST_UID_KEY = "weibo_last_uid_v2";
 
   // Weibo mobile API endpoint
   const API_BASE = "https://m.weibo.cn/api/container/getIndex";
@@ -161,6 +164,27 @@
       localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
     } catch (e) {
       console.error("WeiboTimeline: failed to save timeline", e);
+    }
+  }
+
+  function loadLastUid() {
+    try {
+      return localStorage.getItem(LAST_UID_KEY) || null;
+    } catch (e) {
+      console.error("WeiboTimeline: failed to parse last UID", e);
+      return null;
+    }
+  }
+
+  function saveLastUid(uid) {
+    try {
+      if (uid) {
+        localStorage.setItem(LAST_UID_KEY, uid);
+      } else {
+        localStorage.removeItem(LAST_UID_KEY);
+      }
+    } catch (e) {
+      console.error("WeiboTimeline: failed to save last UID", e);
     }
   }
 
@@ -597,6 +621,10 @@
         } else {
           pageLog("PROCESS_DONE", { uid, added: 0 });
         }
+
+        // Save this UID as the last successfully processed
+        saveLastUid(uid);
+        
       } catch (err) {
         pageLog("PROCESS_FAILED", {
           uid,
@@ -615,11 +643,32 @@
         cycleSec: CYCLE_INTERVAL_MS / 1000
       });
 
+      // Load last processed UID to resume from there
+      const lastUid = loadLastUid();
+      let startIndex = 0;
+      
+      if (lastUid) {
+        const lastUidIndex = USERS.indexOf(lastUid);
+        if (lastUidIndex !== -1) {
+          startIndex = lastUidIndex + 1; // Start from the next UID after the last processed one
+          if (startIndex >= USERS.length) {
+            startIndex = 0; // Wrap around if we reached the end
+          }
+          pageLog("ResumeFromLastUid", { lastUid, startIndex: startIndex + 1 });
+        } else {
+          pageLog("LastUidNotFound", { lastUid });
+        }
+      }
+
       while (true) {
         const cycleStart = Date.now();
-        pageLog("CycleStart", { at: new Date(cycleStart).toISOString() });
+        pageLog("CycleStart", { 
+          at: new Date(cycleStart).toISOString(),
+          startIndex: startIndex + 1,
+          totalAccounts: USERS.length
+        });
 
-        for (let i = 0; i < USERS.length; i++) {
+        for (let i = startIndex; i < USERS.length; i++) {
           const uid = USERS[i];
           setStatus("Fetching account " + (i + 1) + " / " + USERS.length + "…");
 
@@ -635,9 +684,20 @@
 
           if (i < USERS.length - 1) {
             pageLog("SleepBetweenAccounts", { uid, ms: BETWEEN_ACCOUNTS_MS });
-            await sleep(BETWEEN_ACCOUNTS_MS);
+            try {
+              await sleep(BETWEEN_ACCOUNTS_MS);
+              pageLog("AfterSleepBetweenAccounts", { uid });
+            } catch (e) {
+              pageLog("SleepError", {
+                uid,
+                error: e && e.message ? e.message : String(e)
+              });
+            }
           }
         }
+
+        // Reset startIndex to 0 after completing a partial cycle
+        startIndex = 0;
 
         const elapsed   = Date.now() - cycleStart;
         const remaining = CYCLE_INTERVAL_MS - elapsed;
