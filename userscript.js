@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Hourly, Merged, Text-Only • v3.3)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.0)
 // @namespace    http://tampermonkey.net/
-// @version      3.3
-// @description  Merged Weibo timeline: slow hourly polling, text-only UI, local archive, username-first display. Enhanced with proper timeline sorting, UID management, and resume functionality.
+// @version      4.0
+// @description  Enhanced Weibo timeline: manual refresh, editable UIDs, image support, improved masonry layout, new theme modes (Visionary/Creative/Momentum/Legacy), local archive with visual content.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -132,8 +132,8 @@
 
   // Spacing between API calls for different accounts
   const BETWEEN_ACCOUNTS_MS = 5 * 1000;       // 5 seconds
-  // How often to complete a full cycle of all accounts
-  const CYCLE_INTERVAL_MS   = 60 * 60 * 1000; // 1 hour
+  // How often to complete a full cycle of all accounts (now manual only)
+  const CYCLE_INTERVAL_MS   = 60 * 60 * 1000; // 1 hour (for reference only)
 
   // LocalStorage keys
   const TIMELINE_KEY = "weibo_timeline_v3";
@@ -141,6 +141,8 @@
   const LAST_UID_KEY = "weibo_last_uid_v3";
   const AGENT_MODE_KEY = "weibo_agent_mode_v1";
   const THEME_KEY = "weibo_theme_v1";
+  const USERS_KEY = "weibo_users_v1";
+  const IMAGES_KEY = "weibo_images_v1";
 
   // Weibo mobile API endpoint
   const API_BASE = "https://m.weibo.cn/api/container/getIndex";
@@ -213,6 +215,100 @@
     } catch (e) {
       console.error("WeiboTimeline: failed to save last UID", e);
     }
+  }
+
+  function loadUsers() {
+    try {
+      const raw = localStorage.getItem(USERS_KEY);
+      return raw ? JSON.parse(raw) : USERS;
+    } catch (e) {
+      console.error("WeiboTimeline: failed to parse users", e);
+      return USERS;
+    }
+  }
+
+  function saveUsers(users) {
+    try {
+      localStorage.setItem(USERS_KEY, JSON.stringify(users));
+    } catch (e) {
+      console.error("WeiboTimeline: failed to save users", e);
+    }
+  }
+
+  function loadImages() {
+    try {
+      const raw = localStorage.getItem(IMAGES_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      console.error("WeiboTimeline: failed to parse images", e);
+      return {};
+    }
+  }
+
+  function saveImages(images) {
+    try {
+      localStorage.setItem(IMAGES_KEY, JSON.stringify(images));
+    } catch (e) {
+      console.error("WeiboTimeline: failed to save images", e);
+    }
+  }
+
+  function downloadImage(url, key) {
+    return new Promise((resolve, reject) => {
+      // Check if image already exists
+      const existingImages = loadImages();
+      if (existingImages[key]) {
+        resolve(existingImages[key]);
+        return;
+      }
+
+      gmRequest({
+        method: "GET",
+        url,
+        responseType: "blob",
+        timeout: 10000,
+        onload: (response) => {
+          try {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const dataUrl = reader.result;
+              existingImages[key] = {
+                url: dataUrl,
+                originalUrl: url,
+                downloadedAt: Date.now()
+              };
+              saveImages(existingImages);
+              resolve(dataUrl);
+            };
+            reader.onerror = () => reject(new Error("Failed to read image data"));
+            reader.readAsDataURL(response.response);
+          } catch (e) {
+            reject(new Error("Failed to process image: " + e.message));
+          }
+        },
+        onerror: () => reject(new Error("Network error downloading image")),
+        ontimeout: () => reject(new Error("Timeout downloading image"))
+      });
+    });
+  }
+
+  function extractImages(mblog) {
+    const images = [];
+    
+    if (mblog.pics && Array.isArray(mblog.pics)) {
+      mblog.pics.forEach((pic, index) => {
+        if (pic.url) {
+          images.push({
+            url: pic.url,
+            thumbnail: pic.thumbnail || pic.url,
+            alt: pic.alt || `Image ${index + 1}`,
+            key: `${mblog.bid || mblog.id}_img_${index}`
+          });
+        }
+      });
+    }
+    
+    return images;
   }
 
   function gmRequest(opts) {
@@ -371,7 +467,8 @@
     }
 
     const doc = tab.document;
-    const accountsSummary = USERS.length + " accounts";
+    const currentUsers = loadUsers();
+    const accountsSummary = currentUsers.length + " accounts";
 
     doc.open();
     doc.write(`<!DOCTYPE html>
@@ -418,7 +515,7 @@
       --color-border-current: var(--color-border-light);
       --color-shadow-current: var(--color-shadow-light);
       
-      /* Agent Mode Color Tokens - SMART (Default) */
+      /* Agent Mode Color Tokens - VISIONARY (Default) */
       --color-agent-primary: #03C561;
       --color-agent-primary-hover: #029C49;
       --color-agent-primary-light: rgba(3,197,97,0.1);
@@ -474,8 +571,8 @@
       --shadow-lg: 0 8px 25px rgba(15,23,42,0.8);
     }
     
-    /* Agent Mode: FREE (Blue) */
-    body[data-agent-mode="free"] {
+    /* Agent Mode: CREATIVE (Blue) */
+    body[data-agent-mode="creative"] {
       --color-agent-primary: #00B8FF;
       --color-agent-primary-hover: #0090CC;
       --color-agent-primary-light: rgba(0,184,255,0.1);
@@ -486,8 +583,8 @@
       --color-success: #00B8FF;
     }
     
-    /* Agent Mode: RUSH (Gold) */
-    body[data-agent-mode="rush"] {
+    /* Agent Mode: MOMENTUM (Gold) */
+    body[data-agent-mode="momentum"] {
       --color-agent-primary: #E4B402;
       --color-agent-primary-hover: #C29902;
       --color-agent-primary-light: rgba(228,180,2,0.1);
@@ -498,8 +595,8 @@
       --color-success: #E4B402;
     }
     
-    /* Agent Mode: PLAN (Purple) */
-    body[data-agent-mode="plan"] {
+    /* Agent Mode: LEGACY (Purple) */
+    body[data-agent-mode="legacy"] {
       --color-agent-primary: #9333EA;
       --color-agent-primary-hover: #7E22CE;
       --color-agent-primary-light: rgba(147,51,234,0.1);
@@ -510,8 +607,8 @@
       --color-success: #9333EA;
     }
     
-    /* Agent Mode: SMART (Green - Default) */
-    body[data-agent-mode="smart"] {
+    /* Agent Mode: VISIONARY (Green - Default) */
+    body[data-agent-mode="visionary"] {
       --color-agent-primary: #03C561;
       --color-agent-primary-hover: #029C49;
       --color-agent-primary-light: rgba(3,197,97,0.1);
@@ -660,9 +757,10 @@
     }
     #list{
       display:grid;
-      grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+      grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
       gap:var(--spacing-md);
       margin-top:0;
+      grid-auto-rows:min-content;
     }
     .item{
       background:var(--color-secondary-current);
@@ -670,8 +768,42 @@
       padding:var(--spacing-md);
       border:1px solid var(--color-border-current);
       box-shadow:0 2px 8px var(--color-shadow-current);
-      margin-bottom:var(--spacing-md);
       transition:all 0.2s;
+      grid-row:span auto;
+      min-height:120px;
+      display:flex;
+      flex-direction:column;
+    }
+    .images{
+      display:grid;
+      grid-template-columns:repeat(2,1fr);
+      gap:var(--spacing-xs);
+      margin:var(--spacing-sm) 0;
+      border-radius:var(--border-radius);
+      overflow:hidden;
+    }
+    .images.single{
+      grid-template-columns:1fr;
+    }
+    .image-container{
+      position:relative;
+      width:100%;
+      padding-bottom:100%;
+      overflow:hidden;
+      border-radius:var(--border-radius-sm);
+    }
+    .post-image{
+      position:absolute;
+      top:0;
+      left:0;
+      width:100%;
+      height:100%;
+      object-fit:cover;
+      cursor:pointer;
+      transition:transform 0.2s;
+    }
+    .post-image:hover{
+      transform:scale(1.05);
     }
     .item:hover{
       border-color:var(--color-agent-primary);
@@ -787,31 +919,31 @@
       color:#FFF;
       border-color:var(--color-agent-primary);
     }
-    .mode-btn.smart{
+    .mode-btn.visionary{
       color:#03C561;
     }
-    .mode-btn.smart.active{
+    .mode-btn.visionary.active{
       background:#03C561;
       color:#FFF;
     }
-    .mode-btn.free{
+    .mode-btn.creative{
       color:#00B8FF;
     }
-    .mode-btn.free.active{
+    .mode-btn.creative.active{
       background:#00B8FF;
       color:#FFF;
     }
-    .mode-btn.rush{
+    .mode-btn.momentum{
       color:#E4B402;
     }
-    .mode-btn.rush.active{
+    .mode-btn.momentum.active{
       background:#E4B402;
       color:#FFF;
     }
-    .mode-btn.plan{
+    .mode-btn.legacy{
       color:#9333EA;
     }
-    .mode-btn.plan.active{
+    .mode-btn.legacy.active{
       background:#9333EA;
       color:#FFF;
     }
@@ -850,22 +982,24 @@
       <h1>Weibo Timeline</h1>
       <div class="subtitle">
         Following ${accountsSummary}. This archive lives only in your browser.<br>
-        Auto-refresh: ~once per hour, one account every ~5 seconds.
+        Manual refresh: Click "Refresh All" to fetch new posts.
       </div>
       <div class="mode-selector">
-        <button class="mode-btn smart active" onclick="window.setAgentMode('smart')">SMART</button>
-        <button class="mode-btn free" onclick="window.setAgentMode('free')">FREE</button>
-        <button class="mode-btn rush" onclick="window.setAgentMode('rush')">RUSH</button>
-        <button class="mode-btn plan" onclick="window.setAgentMode('plan')">PLAN</button>
+        <button class="mode-btn visionary active" onclick="window.setAgentMode('visionary')">VISIONARY</button>
+        <button class="mode-btn creative" onclick="window.setAgentMode('creative')">CREATIVE</button>
+        <button class="mode-btn momentum" onclick="window.setAgentMode('momentum')">MOMENTUM</button>
+        <button class="mode-btn legacy" onclick="window.setAgentMode('legacy')">LEGACY</button>
       </div>
       <div class="controls" style="margin-top: 8px;">
         <button id="theme-toggle-btn" onclick="window.toggleTheme()" style="flex: 1;">☀️ Light Theme</button>
+        <button id="refresh-all-btn" onclick="window.refreshAll()" style="flex: 1; background: var(--color-agent-primary); color: white;">🔄 Refresh All</button>
       </div>
       <div id="uid-status"></div>
       <div class="controls">
         <button onclick="window.validateAllUids()">Validate All UIDs</button>
         <button onclick="window.exportUidHealth()">Export UID Health</button>
         <button onclick="window.showUidManagement()">Manage UIDs</button>
+        <button onclick="window.editUids()">Edit UIDs</button>
         <button onclick="window.clearInvalidUids()">Clear Invalid UIDs</button>
       </div>
       <div id="status"></div>
@@ -900,10 +1034,10 @@
     
     function loadAgentMode() {
       try {
-        return localStorage.getItem(AGENT_MODE_KEY) || 'smart';
+        return localStorage.getItem(AGENT_MODE_KEY) || 'visionary';
       } catch (e) {
         console.error("WeiboTimeline: failed to load agent mode", e);
-        return 'smart';
+        return 'visionary';
       }
     }
     
@@ -1018,9 +1152,12 @@
       if (statusEl) statusEl.textContent = message;
     }
 
+    // Load existing timeline from localStorage
+    let timeline = loadTimeline();
+
     function updateUidStatus() {
       const health = loadUidHealth();
-      const total = USERS.length;
+      const total = currentUsers.length;
       const valid = Object.values(health).filter(h => h.status === HEALTH_VALID).length;
       const invalid = Object.values(health).filter(h => h.status === HEALTH_INVALID).length;
       const stalled = Object.values(health).filter(h => h.status === HEALTH_STALLED).length;
@@ -1034,11 +1171,9 @@
       `;
     }
 
-    // Load existing timeline from localStorage
-    let timeline = loadTimeline();
     updateUidStatus();
     pageLog("Dashboard opened", {
-      accounts: USERS.length,
+      accounts: currentUsers.length,
       storedEntries: Object.keys(timeline).length
     });
 
@@ -1101,6 +1236,44 @@
         textDiv.className = "text";
         textDiv.textContent = truncate(entry.text, 200);
 
+        // Add images if they exist
+        if (entry.images && entry.images.length > 0) {
+          const imagesDiv = doc.createElement("div");
+          imagesDiv.className = entry.images.length === 1 ? "images single" : "images";
+
+          entry.images.forEach((image, index) => {
+            const imgContainer = doc.createElement("div");
+            imgContainer.className = "image-container";
+
+            const img = doc.createElement("img");
+            img.className = "post-image";
+            img.alt = image.alt;
+            img.loading = "lazy";
+
+            // Try to use downloaded image first, fallback to thumbnail
+            const downloadedImages = loadImages();
+            if (downloadedImages[image.key]) {
+              img.src = downloadedImages[image.key].url;
+            } else {
+              img.src = image.thumbnail;
+              // Download image in background
+              downloadImage(image.url, image.key).catch(err => {
+                console.warn("Failed to download image:", image.url, err);
+              });
+            }
+
+            img.onclick = () => {
+              // Open full size image in new tab
+              window.open(image.url, '_blank');
+            };
+
+            imgContainer.appendChild(img);
+            imagesDiv.appendChild(imgContainer);
+          });
+
+          item.appendChild(imagesDiv);
+        }
+
         const actions = doc.createElement("div");
         actions.className = "actions";
         const link = doc.createElement("a");
@@ -1129,8 +1302,8 @@
       setStatus("Validating all UIDs...");
       let checked = 0;
       
-      USERS.forEach(async (uid, index) => {
-        setStatus(`Validating UID ${index + 1}/${USERS.length}: ${uid}`);
+      currentUsers.forEach(async (uid, index) => {
+        setStatus(`Validating UID ${index + 1}/${currentUsers.length}: ${uid}`);
         try {
           const json = await fetchUserPosts(uid, pageLog);
           
@@ -1148,7 +1321,7 @@
         
         checked++;
         
-        if (checked < USERS.length) {
+        if (checked < currentUsers.length) {
           await sleep(BETWEEN_ACCOUNTS_MS);
         }
       });
@@ -1157,11 +1330,136 @@
       updateUidStatus();
     }
 
+    tab.window.refreshAll = function refreshAll() {
+      setStatus("Starting manual refresh...");
+      pageLog("MANUAL_REFRESH_START", { accounts: currentUsers.length });
+      
+      // Disable refresh button during process
+      const refreshBtn = doc.getElementById('refresh-all-btn');
+      if (refreshBtn) {
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = '🔄 Refreshing...';
+      }
+      
+      (async function runManualRefresh() {
+        for (let i = 0; i < currentUsers.length; i++) {
+          const uid = currentUsers[i];
+          setStatus("Fetching account " + (i + 1) + " / " + currentUsers.length + "…");
+
+          try {
+            await processOneUid(uid);
+          } catch (err) {
+            pageLog("PROCESS_FATAL", {
+              uid,
+              error: err && err.message ? err.message : String(err)
+            });
+          }
+
+          if (i < currentUsers.length - 1) {
+            pageLog("SleepBetweenAccounts", { uid, ms: BETWEEN_ACCOUNTS_MS });
+            try {
+              await sleep(BETWEEN_ACCOUNTS_MS);
+              pageLog("AfterSleepBetweenAccounts", { uid });
+            } catch (e) {
+              pageLog("SleepError", {
+                uid,
+                error: e && e.message ? e.message : String(e)
+              });
+            }
+          }
+        }
+        
+        setStatus("Manual refresh complete");
+        pageLog("MANUAL_REFRESH_COMPLETE");
+        
+        // Re-enable refresh button
+        if (refreshBtn) {
+          refreshBtn.disabled = false;
+          refreshBtn.textContent = '🔄 Refresh All';
+        }
+      })();
+    }
+
+    tab.window.editUids = function editUids() {
+      const modal = doc.createElement('div');
+      modal.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center;
+        z-index: 10000;
+      `;
+      
+      const content = doc.createElement('div');
+      content.style.cssText = `
+        background: var(--color-background-current); padding: var(--spacing-lg); border-radius: var(--border-radius-lg); 
+        max-width: 600px; max-height: 80vh; overflow-y: auto; margin: var(--spacing-lg);
+        box-shadow: var(--shadow-lg);
+      `;
+      
+      content.innerHTML = `
+        <h3 style="margin: 0 0 var(--spacing-md) 0; color: var(--color-primary-current);">Edit Weibo UIDs</h3>
+        <p style="margin: 0 0 var(--spacing-md) 0; color: var(--color-muted-current); font-size: var(--font-size-small);">
+          Enter one Weibo UID per line. UIDs are typically 6-11 digit numbers.
+        </p>
+        <textarea id="uids-textarea" style="
+          width: 100%; height: 300px; padding: var(--spacing-sm); border: 1px solid var(--color-border-current);
+          border-radius: var(--border-radius); background: var(--color-secondary-current); 
+          color: var(--color-primary-current); font-family: var(--font-family-mono); font-size: var(--font-size-small);
+          resize: vertical;
+        ">${currentUsers.join('\n')}</textarea>
+        <div style="margin-top: var(--spacing-md); display: flex; gap: var(--spacing-sm); justify-content: flex-end;">
+          <button onclick="window.closeUidModal()" style="
+            padding: var(--spacing-sm) var(--spacing-md); border: 1px solid var(--color-border-current);
+            border-radius: var(--border-radius); background: var(--color-secondary-current); 
+            color: var(--color-primary-current); cursor: pointer;
+          ">Cancel</button>
+          <button onclick="window.saveUids()" style="
+            padding: var(--spacing-sm) var(--spacing-md); border: none; border-radius: var(--border-radius);
+            background: var(--color-agent-primary); color: white; cursor: pointer;
+          ">Save UIDs</button>
+        </div>
+      `;
+      
+      modal.appendChild(content);
+      doc.body.appendChild(modal);
+      
+      // Make functions globally accessible
+      tab.window.closeUidModal = function() {
+        modal.remove();
+      }
+      
+      tab.window.saveUids = function() {
+        const textarea = doc.getElementById('uids-textarea');
+        const lines = textarea.value.split('\n')
+          .map(line => line.trim())
+          .filter(line => line.length > 0)
+          .filter(line => validateUid(line));
+        
+        if (lines.length === 0) {
+          alert('No valid UIDs found. Please enter at least one valid 6-11 digit UID.');
+          return;
+        }
+        
+        currentUsers = lines;
+        saveUsers(currentUsers);
+        
+        pageLog("UIDS_UPDATED", { 
+          oldCount: currentUsers.length, 
+          newCount: lines.length,
+          uids: lines 
+        });
+        
+        modal.remove();
+        updateUidStatus();
+        
+        alert(`Successfully updated to ${lines.length} UIDs. The page will now use this new list.`);
+      }
+    }
+
     tab.window.exportUidHealth = function exportUidHealth() {
       const health = loadUidHealth();
       const data = {
         exportDate: new Date().toISOString(),
-        totalUids: USERS.length,
+        totalUids: currentUsers.length,
         health: health
       };
       
@@ -1179,7 +1477,7 @@
 
     tab.window.showUidManagement = function showUidManagement() {
       const health = loadUidHealth();
-      const invalidUids = USERS.filter(uid => {
+      const invalidUids = currentUsers.filter(uid => {
         const h = health[uid];
         return !h || h.status === HEALTH_INVALID || h.status === HEALTH_STALLED;
       });
@@ -1195,7 +1493,7 @@
           const status = h?.status || HEALTH_UNKNOWN;
           const lastChecked = h?.lastChecked ? new Date(h.lastChecked).toLocaleString() : 'Never';
           return `${uid}: ${status} (last checked: ${lastChecked})`;
-        }).join('\n') + '\n\nThese UIDs can be safely removed from the USERS array in the script.';
+        }).join('\n') + '\n\nUse "Edit UIDs" to remove these problematic UIDs.';
       
       const modal = doc.createElement('div');
       modal.style.cssText = `
@@ -1206,15 +1504,16 @@
       
       const content = doc.createElement('div');
       content.style.cssText = `
-        background: var(--color-background); padding: var(--spacing-lg); border-radius: var(--border-radius); max-width: 600px;
+        background: var(--color-background-current); padding: var(--spacing-lg); border-radius: var(--border-radius-lg); max-width: 600px;
         max-height: 80vh; overflow-y: auto; margin: var(--spacing-lg);
+        box-shadow: var(--shadow-lg);
       `;
       content.innerHTML = `
-        <h3>Problematic UIDs Found</h3>
-        <pre style="background: var(--color-secondary); padding: var(--spacing-sm); border-radius: var(--border-radius-sm); overflow-x: auto;">${message}</pre>
+        <h3 style="margin: 0 0 var(--spacing-md) 0; color: var(--color-primary-current);">Problematic UIDs Found</h3>
+        <pre style="background: var(--color-secondary-current); padding: var(--spacing-sm); border-radius: var(--border-radius-sm); overflow-x: auto; color: var(--color-primary-current); font-size: var(--font-size-xs);">${message}</pre>
         <button onclick="window.closeModal()" style="
           margin-top: var(--spacing-sm); padding: var(--spacing-sm) var(--spacing-md); border: none; border-radius: var(--border-radius-sm);
-          background: var(--color-accent-dark); color: var(--color-background); cursor: pointer;
+          background: var(--color-agent-primary); color: white; cursor: pointer;
         ">Close</button>
       `;
       
@@ -1223,15 +1522,27 @@
     }
 
     tab.window.clearInvalidUids = function clearInvalidUids() {
-      if (!confirm(`Remove all invalid and stalled UIDs from the script? This will require manually editing the userscript file.`)) {
-        pageLog("MANUAL_UID_REMOVAL", { 
-          message: "User must manually remove invalid UIDs from USERS array" 
-        });
-        alert(`To remove invalid UIDs:\n\n1. Open the userscript in Tampermonkey\n2. Find the USERS array\n3. Remove these UIDs: ${USERS.filter(uid => {
-          const h = loadUidHealth()[uid];
-          return h && (h.status === HEALTH_INVALID || h.status === HEALTH_STALLED);
-        }).join(', ')}\n\n4. Save the script\n\nThe UID health data will remain for reference.`);
+      if (!confirm(`Remove all invalid and stalled UIDs from your list?`)) {
+        return;
       }
+      
+      const health = loadUidHealth();
+      const validUids = currentUsers.filter(uid => {
+        const h = health[uid];
+        return h && h.status === HEALTH_VALID;
+      });
+      
+      currentUsers = validUids;
+      saveUsers(currentUsers);
+      
+      pageLog("INVALID_UIDS_REMOVED", { 
+        oldCount: currentUsers.length, 
+        newCount: validUids.length,
+        removedCount: currentUsers.length - validUids.length
+      });
+      
+      updateUidStatus();
+      alert(`Successfully removed ${currentUsers.length - validUids.length} invalid UIDs. Now following ${validUids.length} accounts.`);
     }
 
     // Helper function for modal close button
@@ -1290,6 +1601,9 @@
           const createdAt  = mblog.created_at || "";
           const created_ts = parseWeiboTime(createdAt); // FIXED: Parse actual post time
           const link       = "https://weibo.com/" + uid + "/" + bid;
+          
+          // Extract images from the post
+          const images = extractImages(mblog);
 
           timeline[key] = {
             key,
@@ -1299,7 +1613,8 @@
             text: plainText,
             createdAt,
             created_ts,
-            link
+            link,
+            images: images
           };
 
           added++;
@@ -1337,98 +1652,21 @@
     }
 
     // ---------------------------------------------------------------
-    // AUTO-REFRESH LOOP (HOURLY CYCLES, WITH FULL TRY/CATCH AND RESUME)
+    // MANUAL REFRESH ONLY (AUTO-REFRESH DISABLED)
     // ---------------------------------------------------------------
-
-    (async function runAutoRefresh() {
-      pageLog("AutoRefreshStart", {
-        betweenAccountsSec: BETWEEN_ACCOUNTS_MS / 1000,
-        cycleSec: CYCLE_INTERVAL_MS / 1000
-      });
-
-      // Load last processed UID to resume from there
-      const lastUid = loadLastUid();
-      let startIndex = 0;
-      
-      if (lastUid) {
-        const lastUidIndex = USERS.indexOf(lastUid);
-        if (lastUidIndex !== -1) {
-          startIndex = lastUidIndex + 1; // Start from the next UID after the last processed one
-          if (startIndex >= USERS.length) {
-            startIndex = 0; // Wrap around if we reached the end
-          }
-          pageLog("ResumeFromLastUid", { lastUid, startIndex: startIndex + 1 });
-        } else {
-          pageLog("LastUidNotFound", { lastUid });
-        }
-      }
-
-      while (true) {
-        const cycleStart = Date.now();
-        pageLog("CycleStart", { 
-          at: new Date(cycleStart).toISOString(),
-          startIndex: startIndex + 1,
-          totalAccounts: USERS.length
-        });
-
-        for (let i = startIndex; i < USERS.length; i++) {
-          const uid = USERS[i];
-          setStatus("Fetching account " + (i + 1) + " / " + USERS.length + "…");
-
-          try {
-            await processOneUid(uid);
-          } catch (err) {
-            // This should almost never fire, but if it does, it won't kill the loop
-            pageLog("PROCESS_FATAL", {
-              uid,
-              error: err && err.message ? err.message : String(err)
-            });
-          }
-
-          if (i < USERS.length - 1) {
-            pageLog("SleepBetweenAccounts", { uid, ms: BETWEEN_ACCOUNTS_MS });
-            try {
-              await sleep(BETWEEN_ACCOUNTS_MS);
-              pageLog("AfterSleepBetweenAccounts", { uid });
-            } catch (e) {
-              pageLog("SleepError", {
-                uid,
-                error: e && e.message ? e.message : String(e)
-              });
-            }
-          }
-        }
-
-        // Reset startIndex to 0 after completing a partial cycle
-        startIndex = 0;
-
-        const elapsed   = Date.now() - cycleStart;
-        const remaining = CYCLE_INTERVAL_MS - elapsed;
-
-        if (remaining > 0) {
-          const mins = Math.round(remaining / 60000);
-          setStatus(
-            "Idle. Next full refresh in about " +
-              mins +
-              " minute" +
-              (mins === 1 ? "" : "s") +
-              "."
-          );
-          pageLog("CycleSleep", { elapsedMs: elapsed, sleepMs: remaining });
-          await sleep(remaining);
-        } else {
-          setStatus("Starting next cycle immediately (loop took longer than an hour).");
-          pageLog("CycleNoSleep", { elapsedMs: elapsed });
-          // loop continues immediately
-        }
-      }
-    })();
+    
+    pageLog("MANUAL_REFRESH_MODE", { 
+      message: "Auto-refresh disabled. Use 'Refresh All' button for manual updates."
+    });
+    
+    setStatus("Ready for manual refresh. Click 'Refresh All' to fetch new posts.");
   });
 
   // Additional menu command for UID management
   GM_registerMenuCommand("🔧 UID Management", function () {
+    const currentUsersForMenu = loadUsers();
     const health = loadUidHealth();
-    const total = USERS.length;
+    const total = currentUsersForMenu.length;
     const valid = Object.values(health).filter(h => h.status === HEALTH_VALID).length;
     const invalid = Object.values(health).filter(h => h.status === HEALTH_INVALID).length;
     const stalled = Object.values(health).filter(h => h.status === HEALTH_STALLED).length;
