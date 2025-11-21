@@ -690,6 +690,7 @@
     .meta .name{
       font-weight:var(--font-weight-semibold);
       color:var(--color-primary-current);
+      font-size:var(--font-size-xs);
     }
     .meta .dot{
       opacity:0.5;
