@@ -66,6 +66,34 @@ const HEALTH_UNKNOWN = 'unknown';   // Not yet checked
 - **Better Error Display**: Clear error messages and status updates
 - **Additional Menu Commands**: Quick access to UID management
 
+### 5. **Agent Mode Color Themes** 🎨
+**Features**:
+- **Four Agent Modes**: SMART (Green), FREE (Blue), RUSH (Gold), PLAN (Purple)
+- **Dynamic Color System**: All UI elements adapt to selected mode
+- **Persistent Preferences**: Selected mode saved in localStorage
+- **Comprehensive Token System**: Buttons, links, accents all reflect the active mode
+
+**Agent Modes**:
+```javascript
+// SMART (Green - Default): Balanced, focused workflow
+Primary: #03C561, Hover: #029C49
+
+// FREE (Blue): Creative, exploratory mode  
+Primary: #00B8FF, Hover: #0090CC
+
+// RUSH (Gold): Fast-paced, urgent tasks
+Primary: #E4B402, Hover: #C29902
+
+// PLAN (Purple): Strategic, planning mode
+Primary: #9333EA, Hover: #7E22CE
+```
+
+**Usage**:
+1. Open the dashboard (☰ Dashboard button)
+2. Select your preferred mode from the mode selector
+3. All buttons, links, and accents instantly adapt
+4. Your selection persists across sessions
+
 ## 📋 How to Use the Improved Script
 
 ### Installation
@@ -225,5 +253,7 @@ The improved Weibo Timeline userscript addresses your core requirements:
 ✅ **Testing Framework**: Complete testing setup without Tampermonkey
 ✅ **Error Handling**: Robust error recovery and detailed logging
 ✅ **User Experience**: Enhanced dashboard with management capabilities
+✅ **Agent Mode Themes**: Four dynamic color schemes with persistent preferences
+✅ **Design Token System**: Modern CSS variable architecture for maintainability
 
 The testing interface allows thorough validation of all functionality without requiring Tampermonkey installation, making development and troubleshooting much more efficient.
