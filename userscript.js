@@ -622,10 +622,10 @@
       </div>
       <div id="uid-status"></div>
       <div class="controls">
-        <button onclick="validateAllUids()">Validate All UIDs</button>
-        <button onclick="exportUidHealth()">Export UID Health</button>
-        <button onclick="showUidManagement()">Manage UIDs</button>
-        <button onclick="clearInvalidUids()">Clear Invalid UIDs</button>
+        <button onclick="window.validateAllUids()">Validate All UIDs</button>
+        <button onclick="window.exportUidHealth()">Export UID Health</button>
+        <button onclick="window.showUidManagement()">Manage UIDs</button>
+        <button onclick="window.clearInvalidUids()">Clear Invalid UIDs</button>
       </div>
       <div id="status"></div>
       <div id="log"></div>
@@ -790,7 +790,8 @@
     // UID MANAGEMENT FUNCTIONS
     // ---------------------------------------------------------------
 
-    function validateAllUids() {
+    // Make functions globally accessible to onclick handlers
+    tab.window.validateAllUids = function validateAllUids() {
       setStatus("Validating all UIDs...");
       let checked = 0;
       
@@ -822,7 +823,7 @@
       updateUidStatus();
     }
 
-    function exportUidHealth() {
+    tab.window.exportUidHealth = function exportUidHealth() {
       const health = loadUidHealth();
       const data = {
         exportDate: new Date().toISOString(),
@@ -842,7 +843,7 @@
       pageLog("UID health exported");
     }
 
-    function showUidManagement() {
+    tab.window.showUidManagement = function showUidManagement() {
       const health = loadUidHealth();
       const invalidUids = USERS.filter(uid => {
         const h = health[uid];
@@ -877,7 +878,7 @@
       content.innerHTML = `
         <h3>Problematic UIDs Found</h3>
         <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">${message}</pre>
-        <button onclick="this.parentElement.parentElement.remove()" style="
+        <button onclick="window.closeModal()" style="
           margin-top: 10px; padding: 8px 16px; border: none; border-radius: 4px;
           background: #2563eb; color: white; cursor: pointer;
         ">Close</button>
@@ -887,7 +888,7 @@
       doc.body.appendChild(modal);
     }
 
-    function clearInvalidUids() {
+    tab.window.clearInvalidUids = function clearInvalidUids() {
       if (!confirm(`Remove all invalid and stalled UIDs from the script? This will require manually editing the userscript file.`)) {
         pageLog("MANUAL_UID_REMOVAL", { 
           message: "User must manually remove invalid UIDs from USERS array" 
@@ -896,6 +897,14 @@
           const h = loadUidHealth()[uid];
           return h && (h.status === HEALTH_INVALID || h.status === HEALTH_STALLED);
         }).join(', ')}\n\n4. Save the script\n\nThe UID health data will remain for reference.`);
+      }
+    }
+
+    // Helper function for modal close button
+    tab.window.closeModal = function() {
+      const modal = doc.querySelector('div[style*="position: fixed"]');
+      if (modal) {
+        modal.remove();
       }
     }
 
