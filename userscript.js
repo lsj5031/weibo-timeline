@@ -140,6 +140,7 @@
   const UID_HEALTH_KEY = "weibo_uid_health_v1";
   const LAST_UID_KEY = "weibo_last_uid_v3";
   const AGENT_MODE_KEY = "weibo_agent_mode_v1";
+  const THEME_KEY = "weibo_theme_v1";
 
   // Weibo mobile API endpoint
   const API_BASE = "https://m.weibo.cn/api/container/getIndex";
@@ -393,6 +394,14 @@
       --color-border: #EBEBEB;
       --color-shadow: rgba(0,0,0,0.1);
       
+      /* Light theme base colors (default) */
+      --color-primary-light: #1F2937;
+      --color-secondary-light: #FFFFFF;
+      --color-background-light: #FAFAFA;
+      --color-muted-light: #6B7280;
+      --color-border-light: #E5E7EB;
+      --color-shadow-light: rgba(0,0,0,0.08);
+      
       /* Dark theme base colors */
       --color-primary-dark: #e5e7eb;
       --color-secondary-dark: #020617;
@@ -400,6 +409,14 @@
       --color-muted-dark: #9ca3af;
       --color-border-dark: rgba(148,163,184,0.25);
       --color-shadow-dark: rgba(15,23,42,0.6);
+      
+      /* Default to light theme */
+      --color-primary-current: var(--color-primary-light);
+      --color-secondary-current: var(--color-secondary-light);
+      --color-background-current: var(--color-background-light);
+      --color-muted-current: var(--color-muted-light);
+      --color-border-current: var(--color-border-light);
+      --color-shadow-current: var(--color-shadow-light);
       
       /* Agent Mode Color Tokens - SMART (Default) */
       --color-agent-primary: #03C561;
@@ -505,13 +522,29 @@
       --color-success: #03C561;
     }
     
+    /* Dark theme override */
+    body[data-theme="dark"] {
+      --color-primary-current: var(--color-primary-dark);
+      --color-secondary-current: var(--color-secondary-dark);
+      --color-background-current: var(--color-background-dark);
+      --color-muted-current: var(--color-muted-dark);
+      --color-border-current: var(--color-border-dark);
+      --color-shadow-current: var(--color-shadow-dark);
+    }
+    
     body{
       font-family:var(--font-family-base);
-      background:var(--color-background-dark);
+      background:var(--color-background-current);
       margin:0;
       padding:0;
-      color:var(--color-primary-dark);
+      color:var(--color-primary-current);
       min-height:100vh;
+      overflow-x:hidden;
+      box-sizing:border-box;
+    }
+    
+    *, *::before, *::after {
+      box-sizing:border-box;
     }
     .toggle-panel{
       position:fixed;
@@ -521,10 +554,10 @@
     }
     .toggle-btn{
       padding:var(--spacing-sm) var(--spacing-md);
-      border:1px solid var(--color-border-dark);
+      border:1px solid var(--color-border-current);
       border-radius:var(--border-radius);
       background:var(--color-agent-primary-light);
-      color:var(--color-primary-dark);
+      color:var(--color-primary-current);
       cursor:pointer;
       font-size:12px;
       transition:all 0.2s;
@@ -539,9 +572,8 @@
       top:0;
       left:0;
       right:0;
-      background:rgba(2,6,23,0.95);
-      backdrop-filter:blur(10px);
-      border-bottom:1px solid rgba(148,163,184,0.2);
+      background:var(--color-background-current);
+      border-bottom:1px solid var(--color-border-current);
       padding:var(--spacing-lg);
       z-index:999;
       transform:translateY(-100%);
@@ -553,34 +585,35 @@
       transform:translateY(0);
     }
     .wrap{
-      width:100%;
-      max-width:none;
+      max-width:100%;
       padding:var(--spacing-lg);
       padding-top:80px;
+      margin:0;
+      box-sizing:border-box;
     }
     h1{
       margin:0 0 var(--spacing-xs) 0;
       font-size:20px;
       font-weight:var(--font-weight-bold);
-      color:var(--color-primary-dark);
+      color:var(--color-primary-current);
       letter-spacing: -0.02em;
     }
     .subtitle{
       font-size:12px;
-      color:var(--color-muted-dark);
+      color:var(--color-muted-current);
       margin-bottom:var(--spacing-sm);
     }
     #status{
       font-size:12px;
-      color:var(--color-muted-dark);
+      color:var(--color-muted-current);
       margin-bottom:var(--spacing-sm);
     }
     #uid-status{
       font-size:var(--font-size-xs);
-      color:var(--color-muted-dark);
+      color:var(--color-muted-current);
       margin-bottom:var(--spacing-sm);
       padding:var(--spacing-sm);
-      background:rgba(148,163,184,0.1);
+      background:rgba(3,197,97,0.08);
       border-radius:var(--border-radius);
     }
     .uid-status-item{
@@ -610,19 +643,20 @@
       font-family:var(--font-family-mono);
       font-size:var(--font-size-xs);
       white-space:pre-wrap;
-      background:var(--color-secondary-dark);
+      background:var(--color-secondary-current);
       border-radius:10px;
       padding:6px 8px;
       margin-bottom:var(--spacing-md);
       max-height:140px;
       overflow:auto;
-      border:1px solid rgba(148,163,184,0.3);
+      border:1px solid var(--color-border-current);
       font-weight:400;
       letter-spacing: 0.01em;
+      color:var(--color-primary-current);
     }
     #log .line{
       padding:1px 0;
-      color:var(--color-muted-dark);
+      color:var(--color-muted-current);
     }
     #list{
       display:grid;
@@ -631,22 +665,22 @@
       margin-top:0;
     }
     .item{
-      background:var(--color-secondary-dark);
+      background:var(--color-secondary-current);
       border-radius:var(--border-radius-xl);
       padding:var(--spacing-md);
-      border:1px solid var(--color-border-dark);
-      box-shadow:var(--shadow-md);
+      border:1px solid var(--color-border-current);
+      box-shadow:0 2px 8px var(--color-shadow-current);
       margin-bottom:var(--spacing-md);
       transition:all 0.2s;
     }
     .item:hover{
-      border-color:rgba(248,250,252,0.6);
+      border-color:var(--color-agent-primary);
       transform:translateY(-2px);
-      box-shadow:var(--shadow-lg);
+      box-shadow:0 4px 12px var(--color-shadow-current);
     }
     .meta{
       font-size:var(--font-size-xs);
-      color:var(--color-muted-dark);
+      color:var(--color-muted-current);
       margin-bottom:6px;
       display:flex;
       gap:6px;
@@ -655,7 +689,8 @@
     }
     .meta .name{
       font-weight:var(--font-weight-semibold);
-      color:var(--color-primary-dark);
+      color:var(--color-primary-current);
+      font-size:var(--font-size-xs);
     }
     .meta .dot{
       opacity:0.5;
@@ -663,7 +698,7 @@
     .text{
       font-size:var(--font-size-small);
       line-height:var(--line-height-body);
-      color:var(--color-primary-dark);
+      color:var(--color-primary-current);
       margin-bottom:var(--spacing-sm);
       font-weight:var(--font-weight-regular);
     }
@@ -690,7 +725,7 @@
     }
     .empty{
       font-size:var(--font-size-small);
-      color:#6b7280;
+      color:var(--color-muted-current);
       padding:var(--spacing-xl);
       text-align:center;
       grid-column:1/-1;
@@ -703,10 +738,10 @@
     }
     .controls button{
       padding:6px 12px;
-      border:1px solid var(--color-border-dark);
+      border:1px solid var(--color-border-current);
       border-radius:var(--border-radius);
       background:var(--color-agent-primary-light);
-      color:var(--color-primary-dark);
+      color:var(--color-primary-current);
       cursor:pointer;
       font-size:var(--font-size-xs);
       font-weight:var(--font-weight-medium);
@@ -727,16 +762,16 @@
       gap:var(--spacing-xs);
       margin-bottom:var(--spacing-md);
       padding:var(--spacing-sm);
-      background:rgba(148,163,184,0.05);
+      background:rgba(3,197,97,0.05);
       border-radius:var(--border-radius);
-      border:1px solid var(--color-border-dark);
+      border:1px solid var(--color-border-current);
     }
     .mode-btn{
       padding:var(--spacing-xs) var(--spacing-sm);
       border:1px solid transparent;
       border-radius:var(--border-radius-sm);
       background:transparent;
-      color:var(--color-muted-dark);
+      color:var(--color-muted-current);
       cursor:pointer;
       font-size:var(--font-size-xs);
       font-weight:var(--font-weight-medium);
@@ -745,7 +780,7 @@
       text-align:center;
     }
     .mode-btn:hover{
-      background:rgba(148,163,184,0.1);
+      background:rgba(3,197,97,0.08);
     }
     .mode-btn.active{
       background:var(--color-agent-primary);
@@ -822,6 +857,9 @@
         <button class="mode-btn free" onclick="window.setAgentMode('free')">FREE</button>
         <button class="mode-btn rush" onclick="window.setAgentMode('rush')">RUSH</button>
         <button class="mode-btn plan" onclick="window.setAgentMode('plan')">PLAN</button>
+      </div>
+      <div class="controls" style="margin-top: 8px;">
+        <button id="theme-toggle-btn" onclick="window.toggleTheme()" style="flex: 1;">☀️ Light Theme</button>
       </div>
       <div id="uid-status"></div>
       <div class="controls">
@@ -904,6 +942,50 @@
       const allModeBtns = doc.querySelectorAll('.mode-btn');
       allModeBtns.forEach(btn => btn.classList.remove('active'));
       initialModeBtn.classList.add('active');
+    }
+
+    // Theme management
+    const THEME_KEY_LOCAL = "weibo_theme_v1";
+    
+    function loadTheme() {
+      try {
+        return localStorage.getItem(THEME_KEY_LOCAL) || 'light';
+      } catch (e) {
+        console.error("WeiboTimeline: failed to load theme", e);
+        return 'light';
+      }
+    }
+    
+    function saveTheme(theme) {
+      try {
+        localStorage.setItem(THEME_KEY_LOCAL, theme);
+      } catch (e) {
+        console.error("WeiboTimeline: failed to save theme", e);
+      }
+    }
+    
+    tab.window.toggleTheme = function() {
+      const currentTheme = doc.body.getAttribute('data-theme') || 'light';
+      const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+      
+      doc.body.setAttribute('data-theme', newTheme);
+      const themeBtnEl = doc.getElementById('theme-toggle-btn');
+      if (themeBtnEl) {
+        themeBtnEl.textContent = newTheme === 'light' ? '☀️ Light Theme' : '🌙 Dark Theme';
+      }
+      
+      saveTheme(newTheme);
+      pageLog("THEME_CHANGED", { theme: newTheme });
+    };
+    
+    // Initialize theme
+    const initialTheme = loadTheme();
+    if (initialTheme === 'dark') {
+      doc.body.setAttribute('data-theme', 'dark');
+      const themeBtnEl = doc.getElementById('theme-toggle-btn');
+      if (themeBtnEl) {
+        themeBtnEl.textContent = '🌙 Dark Theme';
+      }
     }
 
     function pageLog(label, data) {
