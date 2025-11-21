@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Hourly, Merged, Text-Only)
+// @name         Weibo Timeline (Hourly, Merged, Text-Only • v3.1)
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description  Merged Weibo timeline: slow hourly polling, text-only UI, local archive, username-first display.
+// @version      3.1
+// @description  Merged Weibo timeline: slow hourly polling, text-only UI, local archive, username-first display. More robust loop for many accounts.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -128,11 +128,10 @@
     // ← add more UIDs here
   ];
 
-  // Spacing between API calls for different accounts (5s)
-  const BETWEEN_ACCOUNTS_MS = 5 * 1000;
-
-  // How often to complete a full cycle of all accounts (~1 hour)
-  const CYCLE_INTERVAL_MS = 60 * 60 * 1000;
+  // Spacing between API calls for different accounts
+  const BETWEEN_ACCOUNTS_MS = 5 * 1000;       // 5 seconds
+  // How often to complete a full cycle of all accounts
+  const CYCLE_INTERVAL_MS   = 60 * 60 * 1000; // 1 hour
 
   // LocalStorage key for the merged timeline
   const TIMELINE_KEY = "weibo_timeline_v2";
@@ -259,7 +258,6 @@
   }
 
   function fetchUserPosts(uid, log) {
-    // Standard pattern for user timeline container
     const containerid = "107603" + uid;
     const params = {
       type: "uid",
@@ -285,134 +283,132 @@
     const accountsSummary = USERS.length + " accounts";
 
     doc.open();
-    doc.write(
-      "<!DOCTYPE html>" +
-      "<html>" +
-      "<head>" +
-      '  <meta charset="utf-8">' +
-      "  <title>Weibo Timeline</title>" +
-      "  <style>" +
-      "    body{" +
-      '      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;' +
-      "      background:#020617;" +
-      "      margin:0;" +
-      "      padding:24px;" +
-      "      color:#e5e7eb;" +
-      "      display:flex;" +
-      "      justify-content:center;" +
-      "    }" +
-      "    .wrap{" +
-      "      width:100%;" +
-      "      max-width:780px;" +
-      "    }" +
-      "    h1{" +
-      "      margin:0 0 4px 0;" +
-      "      font-size:20px;" +
-      "      font-weight:600;" +
-      "      color:#e5e7eb;" +
-      "    }" +
-      "    .subtitle{" +
-      "      font-size:12px;" +
-      "      color:#9ca3af;" +
-      "      margin-bottom:8px;" +
-      "    }" +
-      "    #status{" +
-      "      font-size:12px;" +
-      "      color:#9ca3af;" +
-      "      margin-bottom:8px;" +
-      "    }" +
-      "    #log{" +
-      "      font-family:SFMono-Regular,Menlo,Monaco,Consolas,\"Liberation Mono\",\"Courier New\",monospace;" +
-      "      font-size:11px;" +
-      "      white-space:pre-wrap;" +
-      "      background:#020617;" +
-      "      border-radius:10px;" +
-      "      padding:6px 8px;" +
-      "      margin-bottom:12px;" +
-      "      max-height:140px;" +
-      "      overflow:auto;" +
-      "      border:1px solid rgba(148,163,184,0.3);" +
-      "    }" +
-      "    #log .line{" +
-      "      padding:1px 0;" +
-      "      color:#9ca3af;" +
-      "    }" +
-      "    #list{" +
-      "      display:flex;" +
-      "      flex-direction:column;" +
-      "      gap:10px;" +
-      "      margin-top:4px;" +
-      "    }" +
-      "    .item{" +
-      "      background:#020617;" +
-      "      border-radius:14px;" +
-      "      padding:10px 12px;" +
-      "      border:1px solid rgba(148,163,184,0.25);" +
-      "      box-shadow:0 6px 20px rgba(15,23,42,0.6);" +
-      "    }" +
-      "    .item:hover{" +
-      "      border-color:rgba(248,250,252,0.6);" +
-      "    }" +
-      "    .meta{" +
-      "      font-size:11px;" +
-      "      color:#9ca3af;" +
-      "      margin-bottom:4px;" +
-      "      display:flex;" +
-      "      gap:6px;" +
-      "      align-items:center;" +
-      "    }" +
-      "    .meta .name{" +
-      "      font-weight:500;" +
-      "      color:#e5e7eb;" +
-      "    }" +
-      "    .meta .dot{" +
-      "      opacity:0.5;" +
-      "    }" +
-      "    .text{" +
-      "      font-size:13px;" +
-      "      line-height:1.5;" +
-      "      color:#e5e7eb;" +
-      "      margin-bottom:6px;" +
-      "    }" +
-      "    .actions{" +
-      "      display:flex;" +
-      "      justify-content:flex-end;" +
-      "    }" +
-      "    .actions a{" +
-      "      font-size:11px;" +
-      "      padding:4px 10px;" +
-      "      border-radius:999px;" +
-      "      border:1px solid rgba(59,130,246,0.8);" +
-      "      text-decoration:none;" +
-      "      color:#bfdbfe;" +
-      "      background:rgba(37,99,235,0.1);" +
-      "    }" +
-      "    .actions a:hover{" +
-      "      background:rgba(37,99,235,0.18);" +
-      "      border-color:rgba(191,219,254,1);" +
-      "    }" +
-      "    .empty{" +
-      "      font-size:13px;" +
-      "      color:#6b7280;" +
-      "      padding:16px 4px;" +
-      "      text-align:center;" +
-      "    }" +
-      "  </style>" +
-      "</head>" +
-      "<body>" +
-      '  <div class="wrap">' +
-      "    <h1>Weibo Timeline</h1>" +
-      '    <div class="subtitle">' +
-      "      Following " + accountsSummary + ". This archive lives only in your browser.<br>" +
-      "      Auto-refresh: ~once per hour, one account every ~5 seconds." +
-      "    </div>" +
-      '    <div id="status"></div>' +
-      '    <div id="log"></div>' +
-      '    <div id="list"></div>' +
-      "  </div>" +
-      "</body>" +
-      "</html>"
-    );
+    doc.write(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Weibo Timeline</title>
+  <style>
+    body{
+      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      background:#020617;
+      margin:0;
+      padding:24px;
+      color:#e5e7eb;
+      display:flex;
+      justify-content:center;
+    }
+    .wrap{
+      width:100%;
+      max-width:780px;
+    }
+    h1{
+      margin:0 0 4px 0;
+      font-size:20px;
+      font-weight:600;
+      color:#e5e7eb;
+    }
+    .subtitle{
+      font-size:12px;
+      color:#9ca3af;
+      margin-bottom:8px;
+    }
+    #status{
+      font-size:12px;
+      color:#9ca3af;
+      margin-bottom:8px;
+    }
+    #log{
+      font-family:SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+      font-size:11px;
+      white-space:pre-wrap;
+      background:#020617;
+      border-radius:10px;
+      padding:6px 8px;
+      margin-bottom:12px;
+      max-height:140px;
+      overflow:auto;
+      border:1px solid rgba(148,163,184,0.3);
+    }
+    #log .line{
+      padding:1px 0;
+      color:#9ca3af;
+    }
+    #list{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      margin-top:4px;
+    }
+    .item{
+      background:#020617;
+      border-radius:14px;
+      padding:10px 12px;
+      border:1px solid rgba(148,163,184,0.25);
+      box-shadow:0 6px 20px rgba(15,23,42,0.6);
+    }
+    .item:hover{
+      border-color:rgba(248,250,252,0.6);
+    }
+    .meta{
+      font-size:11px;
+      color:#9ca3af;
+      margin-bottom:4px;
+      display:flex;
+      gap:6px;
+      align-items:center;
+    }
+    .meta .name{
+      font-weight:500;
+      color:#e5e7eb;
+    }
+    .meta .dot{
+      opacity:0.5;
+    }
+    .text{
+      font-size:13px;
+      line-height:1.5;
+      color:#e5e7eb;
+      margin-bottom:6px;
+    }
+    .actions{
+      display:flex;
+      justify-content:flex-end;
+    }
+    .actions a{
+      font-size:11px;
+      padding:4px 10px;
+      border-radius:999px;
+      border:1px solid rgba(59,130,246,0.8);
+      text-decoration:none;
+      color:#bfdbfe;
+      background:rgba(37,99,235,0.1);
+    }
+    .actions a:hover{
+      background:rgba(37,99,235,0.18);
+      border-color:rgba(191,219,254,1);
+    }
+    .empty{
+      font-size:13px;
+      color:#6b7280;
+      padding:16px 4px;
+      text-align:center;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Weibo Timeline</h1>
+    <div class="subtitle">
+      Following ${accountsSummary}. This archive lives only in your browser.<br>
+      Auto-refresh: ~once per hour, one account every ~5 seconds.
+    </div>
+    <div id="status"></div>
+    <div id="log"></div>
+    <div id="list"></div>
+  </div>
+</body>
+</html>`);
     doc.close();
 
     const listEl   = doc.getElementById("list");
@@ -446,9 +442,7 @@
     }
 
     function setStatus(message) {
-      if (statusEl) {
-        statusEl.textContent = message;
-      }
+      if (statusEl) statusEl.textContent = message;
     }
 
     // Load existing timeline from localStorage
@@ -458,9 +452,9 @@
       storedEntries: Object.keys(timeline).length
     });
 
-    // -----------------------------------------------------------------
+    // ---------------------------------------------------------------
     // RENDER TIMELINE
-    // -----------------------------------------------------------------
+    // ---------------------------------------------------------------
 
     function renderTimeline() {
       const entries = Object.values(timeline);
@@ -530,16 +524,15 @@
       });
     }
 
-    // Initial render (whatever we already have)
+    // Initial render
     renderTimeline();
 
-    // -----------------------------------------------------------------
-    // PROCESS ONE UID
-    // -----------------------------------------------------------------
+    // ---------------------------------------------------------------
+    // PROCESS ONE UID (now self-contained, errors won't kill loop)
+    // ---------------------------------------------------------------
 
-    async function processOneUid(uid, index, total) {
-      setStatus("Fetching account " + (index + 1) + " / " + total + "…");
-      pageLog("PROCESS_START", { uid, index: index + 1, total });
+    async function processOneUid(uid) {
+      pageLog("PROCESS_START", { uid });
 
       try {
         const json = await fetchUserPosts(uid, pageLog);
@@ -561,7 +554,6 @@
 
           if (timeline[key]) return; // already in archive
 
-          // Get username (if available)
           let username = "";
           if (mblog.user) {
             username =
@@ -571,15 +563,14 @@
               "";
           }
 
-          // Convert HTML text -> plain text
           const tmp = doc.createElement("div");
           tmp.innerHTML = mblog.text || "";
           const plainText =
             (tmp.textContent || tmp.innerText || "").trim();
 
-          const createdAt = mblog.created_at || "";
+          const createdAt  = mblog.created_at || "";
           const created_ts = Date.now();
-          const link = "https://weibo.com/" + uid + "/" + bid;
+          const link       = "https://weibo.com/" + uid + "/" + bid;
 
           timeline[key] = {
             key,
@@ -607,13 +598,16 @@
           pageLog("PROCESS_DONE", { uid, added: 0 });
         }
       } catch (err) {
-        pageLog("FAILED", { uid, error: err && err.message ? err.message : String(err) });
+        pageLog("PROCESS_FAILED", {
+          uid,
+          error: err && err.message ? err.message : String(err)
+        });
       }
     }
 
-    // -----------------------------------------------------------------
-    // AUTO-REFRESH LOOP (HOURLY CYCLES)
-    // -----------------------------------------------------------------
+    // ---------------------------------------------------------------
+    // AUTO-REFRESH LOOP (HOURLY CYCLES, WITH FULL TRY/CATCH)
+    // ---------------------------------------------------------------
 
     (async function runAutoRefresh() {
       pageLog("AutoRefreshStart", {
@@ -627,26 +621,42 @@
 
         for (let i = 0; i < USERS.length; i++) {
           const uid = USERS[i];
-          await processOneUid(uid, i, USERS.length);
+          setStatus("Fetching account " + (i + 1) + " / " + USERS.length + "…");
+
+          try {
+            await processOneUid(uid);
+          } catch (err) {
+            // This should almost never fire, but if it does, it won't kill the loop
+            pageLog("PROCESS_FATAL", {
+              uid,
+              error: err && err.message ? err.message : String(err)
+            });
+          }
+
           if (i < USERS.length - 1) {
             pageLog("SleepBetweenAccounts", { uid, ms: BETWEEN_ACCOUNTS_MS });
             await sleep(BETWEEN_ACCOUNTS_MS);
           }
         }
 
-        const elapsed = Date.now() - cycleStart;
+        const elapsed   = Date.now() - cycleStart;
         const remaining = CYCLE_INTERVAL_MS - elapsed;
 
         if (remaining > 0) {
           const mins = Math.round(remaining / 60000);
           setStatus(
-            "Idle. Next full refresh in about " + mins + " minute" + (mins === 1 ? "" : "s") + "."
+            "Idle. Next full refresh in about " +
+              mins +
+              " minute" +
+              (mins === 1 ? "" : "s") +
+              "."
           );
           pageLog("CycleSleep", { elapsedMs: elapsed, sleepMs: remaining });
           await sleep(remaining);
         } else {
           setStatus("Starting next cycle immediately (loop took longer than an hour).");
           pageLog("CycleNoSleep", { elapsedMs: elapsed });
+          // loop continues immediately
         }
       }
     })();
