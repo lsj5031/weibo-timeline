@@ -19,6 +19,14 @@
             --color-border: #EBEBEB;
             --color-shadow: rgba(0,0,0,0.1);
             
+            /* Light theme base colors (default) */
+            --color-primary-light: #1F2937;
+            --color-secondary-light: #FFFFFF;
+            --color-background-light: #FAFAFA;
+            --color-muted-light: #6B7280;
+            --color-border-light: #E5E7EB;
+            --color-shadow-light: rgba(0,0,0,0.08);
+            
             /* Dark theme base colors */
             --color-primary-dark: #e5e7eb;
             --color-secondary-dark: #020617;
@@ -26,6 +34,14 @@
             --color-muted-dark: #9ca3af;
             --color-border-dark: rgba(148,163,184,0.25);
             --color-shadow-dark: rgba(15,23,42,0.6);
+            
+            /* Default to light theme */
+            --color-primary-current: var(--color-primary-light);
+            --color-secondary-current: var(--color-secondary-light);
+            --color-background-current: var(--color-background-light);
+            --color-muted-current: var(--color-muted-light);
+            --color-border-current: var(--color-border-light);
+            --color-shadow-current: var(--color-shadow-light);
             
             /* Agent Mode Color Tokens - SMART (Default) */
             --color-agent-primary: #03C561;
@@ -131,6 +147,16 @@
             --color-success: #03C561;
         }
         
+        /* Dark theme override */
+        body[data-theme="dark"] {
+            --color-primary-current: var(--color-primary-dark);
+            --color-secondary-current: var(--color-secondary-dark);
+            --color-background-current: var(--color-background-dark);
+            --color-muted-current: var(--color-muted-dark);
+            --color-border-current: var(--color-border-dark);
+            --color-shadow-current: var(--color-shadow-dark);
+        }
+        
         body {
             font-family: var(--font-family-base);
             max-width: 1200px;
@@ -138,6 +164,12 @@
             padding: var(--spacing-lg);
             background: var(--color-secondary);
             font-weight: var(--font-weight-regular);
+            overflow-x: hidden;
+            box-sizing: border-box;
+        }
+        
+        *, *::before, *::after {
+            box-sizing: border-box;
         }
         
         h1 {
