@@ -382,14 +382,53 @@
       font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
       background:#020617;
       margin:0;
-      padding:24px;
+      padding:0;
       color:#e5e7eb;
-      display:flex;
-      justify-content:center;
+      min-height:100vh;
+    }
+    .toggle-panel{
+      position:fixed;
+      top:20px;
+      right:20px;
+      z-index:1000;
+    }
+    .toggle-btn{
+      padding:8px 16px;
+      border:1px solid rgba(148,163,184,0.3);
+      border-radius:6px;
+      background:rgba(37,99,235,0.1);
+      color:#e5e7eb;
+      cursor:pointer;
+      font-size:12px;
+      transition:all 0.2s;
+    }
+    .toggle-btn:hover{
+      background:rgba(37,99,235,0.2);
+      border-color:rgba(148,163,184,0.5);
+    }
+    .top-panel{
+      position:fixed;
+      top:0;
+      left:0;
+      right:0;
+      background:rgba(2,6,23,0.95);
+      backdrop-filter:blur(10px);
+      border-bottom:1px solid rgba(148,163,184,0.2);
+      padding:20px;
+      z-index:999;
+      transform:translateY(-100%);
+      transition:transform 0.3s ease-in-out;
+      max-height:70vh;
+      overflow-y:auto;
+    }
+    .top-panel.visible{
+      transform:translateY(0);
     }
     .wrap{
       width:100%;
-      max-width:780px;
+      max-width:none;
+      padding:20px;
+      padding-top:80px;
     }
     h1{
       margin:0 0 4px 0;
@@ -455,28 +494,33 @@
       color:#9ca3af;
     }
     #list{
-      display:flex;
-      flex-direction:column;
-      gap:10px;
-      margin-top:4px;
+      columns:4 320px;
+      column-gap:16px;
+      margin-top:0;
     }
     .item{
       background:#020617;
       border-radius:14px;
-      padding:10px 12px;
+      padding:12px;
       border:1px solid rgba(148,163,184,0.25);
       box-shadow:0 6px 20px rgba(15,23,42,0.6);
+      break-inside:avoid;
+      margin-bottom:16px;
+      transition:all 0.2s;
     }
     .item:hover{
       border-color:rgba(248,250,252,0.6);
+      transform:translateY(-2px);
+      box-shadow:0 8px 25px rgba(15,23,42,0.8);
     }
     .meta{
       font-size:11px;
       color:#9ca3af;
-      margin-bottom:4px;
+      margin-bottom:6px;
       display:flex;
       gap:6px;
       align-items:center;
+      flex-wrap:wrap;
     }
     .meta .name{
       font-weight:500;
@@ -489,7 +533,7 @@
       font-size:13px;
       line-height:1.5;
       color:#e5e7eb;
-      margin-bottom:6px;
+      margin-bottom:8px;
     }
     .actions{
       display:flex;
@@ -503,6 +547,7 @@
       text-decoration:none;
       color:#bfdbfe;
       background:rgba(37,99,235,0.1);
+      transition:all 0.2s;
     }
     .actions a:hover{
       background:rgba(37,99,235,0.18);
@@ -511,8 +556,9 @@
     .empty{
       font-size:13px;
       color:#6b7280;
-      padding:16px 4px;
+      padding:32px;
       text-align:center;
+      grid-column:1/-1;
     }
     .controls{
       margin-bottom:12px;
@@ -528,6 +574,7 @@
       color:#e5e7eb;
       cursor:pointer;
       font-size:11px;
+      transition:all 0.2s;
     }
     .controls button:hover{
       background:rgba(37,99,235,0.2);
@@ -536,24 +583,56 @@
       opacity:0.5;
       cursor:not-allowed;
     }
+    @media (max-width:1200px){
+      #list{
+        columns:3 280px;
+      }
+    }
+    @media (max-width:900px){
+      #list{
+        columns:2 320px;
+      }
+      .wrap{
+        padding:16px;
+        padding-top:80px;
+      }
+    }
+    @media (max-width:600px){
+      #list{
+        columns:1;
+      }
+      .wrap{
+        padding:12px;
+        padding-top:80px;
+      }
+    }
   </style>
 </head>
 <body>
+  <div class="toggle-panel">
+    <button class="toggle-btn" onclick="toggleTopPanel()">☰ Dashboard</button>
+  </div>
+  
+  <div class="top-panel" id="topPanel">
+    <div class="wrap">
+      <h1>Weibo Timeline</h1>
+      <div class="subtitle">
+        Following ${accountsSummary}. This archive lives only in your browser.<br>
+        Auto-refresh: ~once per hour, one account every ~5 seconds.
+      </div>
+      <div id="uid-status"></div>
+      <div class="controls">
+        <button onclick="window.validateAllUids()">Validate All UIDs</button>
+        <button onclick="window.exportUidHealth()">Export UID Health</button>
+        <button onclick="window.showUidManagement()">Manage UIDs</button>
+        <button onclick="window.clearInvalidUids()">Clear Invalid UIDs</button>
+      </div>
+      <div id="status"></div>
+      <div id="log"></div>
+    </div>
+  </div>
+  
   <div class="wrap">
-    <h1>Weibo Timeline</h1>
-    <div class="subtitle">
-      Following ${accountsSummary}. This archive lives only in your browser.<br>
-      Auto-refresh: ~once per hour, one account every ~5 seconds.
-    </div>
-    <div id="uid-status"></div>
-    <div class="controls">
-      <button onclick="window.validateAllUids()">Validate All UIDs</button>
-      <button onclick="window.exportUidHealth()">Export UID Health</button>
-      <button onclick="window.showUidManagement()">Manage UIDs</button>
-      <button onclick="window.clearInvalidUids()">Clear Invalid UIDs</button>
-    </div>
-    <div id="status"></div>
-    <div id="log"></div>
     <div id="list"></div>
   </div>
 </body>
@@ -564,6 +643,16 @@
     const logEl    = doc.getElementById("log");
     const statusEl = doc.getElementById("status");
     const uidStatusEl = doc.getElementById("uid-status");
+    const topPanelEl = doc.getElementById("topPanel");
+
+    // Toggle function for the top panel
+    doc.toggleTopPanel = function() {
+      if (topPanelEl.classList.contains('visible')) {
+        topPanelEl.classList.remove('visible');
+      } else {
+        topPanelEl.classList.add('visible');
+      }
+    };
 
     function pageLog(label, data) {
       const now = new Date();
