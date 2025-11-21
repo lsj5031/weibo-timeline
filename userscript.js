@@ -139,6 +139,7 @@
   const TIMELINE_KEY = "weibo_timeline_v3";
   const UID_HEALTH_KEY = "weibo_uid_health_v1";
   const LAST_UID_KEY = "weibo_last_uid_v3";
+  const AGENT_MODE_KEY = "weibo_agent_mode_v1";
 
   // Weibo mobile API endpoint
   const API_BASE = "https://m.weibo.cn/api/container/getIndex";
@@ -382,23 +383,45 @@
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      /* Color Design Tokens */
+      /* Base Color Design Tokens */
       --color-primary: #000;
       --color-secondary: #F5F5F5;
       --color-background: #FFF;
-      --color-accent: #007BFF;
+      --color-background-card: #FAFAFA;
+      --color-background-secondary: #F3F6FA;
       --color-muted: #888;
       --color-border: #EBEBEB;
       --color-shadow: rgba(0,0,0,0.1);
       
-      /* Dark theme adaptations */
+      /* Dark theme base colors */
       --color-primary-dark: #e5e7eb;
       --color-secondary-dark: #020617;
       --color-background-dark: #0f172a;
-      --color-accent-dark: #2563eb;
       --color-muted-dark: #9ca3af;
       --color-border-dark: rgba(148,163,184,0.25);
       --color-shadow-dark: rgba(15,23,42,0.6);
+      
+      /* Agent Mode Color Tokens - SMART (Default) */
+      --color-agent-primary: #03C561;
+      --color-agent-primary-hover: #029C49;
+      --color-agent-primary-light: rgba(3,197,97,0.1);
+      --color-agent-primary-dark: #003700;
+      --color-agent-accent: #03C561;
+      
+      /* Button Colors */
+      --button-primary-bg: var(--color-agent-primary);
+      --button-primary-hover: var(--color-agent-primary-hover);
+      --button-primary-text: #FFF;
+      --button-secondary-bg: #F5F5F5;
+      --button-secondary-text: #333;
+      --button-disabled-bg: #EBEBEB;
+      --button-disabled-text: #BDBDBD;
+      
+      /* Status Colors */
+      --color-success: #03C561;
+      --color-warning: #FFD600;
+      --color-error: #FF5252;
+      --color-info: #17A2B8;
       
       /* Typography Design Tokens */
       --font-family-base: 'Space Grotesk', 'Bricolage Grotesque', 'IBM Plex Sans', sans-serif;
@@ -434,6 +457,54 @@
       --shadow-lg: 0 8px 25px rgba(15,23,42,0.8);
     }
     
+    /* Agent Mode: FREE (Blue) */
+    body[data-agent-mode="free"] {
+      --color-agent-primary: #00B8FF;
+      --color-agent-primary-hover: #0090CC;
+      --color-agent-primary-light: rgba(0,184,255,0.1);
+      --color-agent-primary-dark: #001A33;
+      --color-agent-accent: #00B8FF;
+      --button-primary-bg: #00B8FF;
+      --button-primary-hover: #0090CC;
+      --color-success: #00B8FF;
+    }
+    
+    /* Agent Mode: RUSH (Gold) */
+    body[data-agent-mode="rush"] {
+      --color-agent-primary: #E4B402;
+      --color-agent-primary-hover: #C29902;
+      --color-agent-primary-light: rgba(228,180,2,0.1);
+      --color-agent-primary-dark: #F6C700;
+      --color-agent-accent: #E4B402;
+      --button-primary-bg: #E4B402;
+      --button-primary-hover: #C29902;
+      --color-success: #E4B402;
+    }
+    
+    /* Agent Mode: PLAN (Purple) */
+    body[data-agent-mode="plan"] {
+      --color-agent-primary: #9333EA;
+      --color-agent-primary-hover: #7E22CE;
+      --color-agent-primary-light: rgba(147,51,234,0.1);
+      --color-agent-primary-dark: #581C87;
+      --color-agent-accent: #9333EA;
+      --button-primary-bg: #9333EA;
+      --button-primary-hover: #7E22CE;
+      --color-success: #9333EA;
+    }
+    
+    /* Agent Mode: SMART (Green - Default) */
+    body[data-agent-mode="smart"] {
+      --color-agent-primary: #03C561;
+      --color-agent-primary-hover: #029C49;
+      --color-agent-primary-light: rgba(3,197,97,0.1);
+      --color-agent-primary-dark: #003700;
+      --color-agent-accent: #03C561;
+      --button-primary-bg: #03C561;
+      --button-primary-hover: #029C49;
+      --color-success: #03C561;
+    }
+    
     body{
       font-family:var(--font-family-base);
       background:var(--color-background-dark);
@@ -452,15 +523,16 @@
       padding:var(--spacing-sm) var(--spacing-md);
       border:1px solid var(--color-border-dark);
       border-radius:var(--border-radius);
-      background:rgba(37,99,235,0.1);
+      background:var(--color-agent-primary-light);
       color:var(--color-primary-dark);
       cursor:pointer;
       font-size:12px;
       transition:all 0.2s;
     }
     .toggle-btn:hover{
-      background:rgba(37,99,235,0.2);
-      border-color:rgba(148,163,184,0.5);
+      background:var(--color-agent-primary-light);
+      border-color:var(--color-agent-primary);
+      opacity:0.8;
     }
     .top-panel{
       position:fixed;
@@ -603,17 +675,18 @@
       font-size:var(--font-size-xs);
       padding:4px 10px;
       border-radius:var(--border-radius-full);
-      border:1px solid rgba(59,130,246,0.8);
+      border:1px solid var(--color-agent-primary);
       text-decoration:none;
-      color:#bfdbfe;
-      background:rgba(37,99,235,0.1);
+      color:var(--color-agent-primary);
+      background:var(--color-agent-primary-light);
       font-weight:var(--font-weight-medium);
       letter-spacing: 0.01em;
       transition:all 0.2s;
     }
     .actions a:hover{
-      background:rgba(37,99,235,0.18);
-      border-color:rgba(191,219,254,1);
+      background:var(--color-agent-primary);
+      color:#FFF;
+      border-color:var(--color-agent-primary-hover);
     }
     .empty{
       font-size:var(--font-size-small);
@@ -632,7 +705,7 @@
       padding:6px 12px;
       border:1px solid var(--color-border-dark);
       border-radius:var(--border-radius);
-      background:rgba(37,99,235,0.1);
+      background:var(--color-agent-primary-light);
       color:var(--color-primary-dark);
       cursor:pointer;
       font-size:var(--font-size-xs);
@@ -641,11 +714,71 @@
       transition:all 0.2s;
     }
     .controls button:hover{
-      background:rgba(37,99,235,0.2);
+      background:var(--color-agent-primary);
+      color:#FFF;
+      border-color:var(--color-agent-primary);
     }
     .controls button:disabled{
       opacity:0.5;
       cursor:not-allowed;
+    }
+    .mode-selector{
+      display:flex;
+      gap:var(--spacing-xs);
+      margin-bottom:var(--spacing-md);
+      padding:var(--spacing-sm);
+      background:rgba(148,163,184,0.05);
+      border-radius:var(--border-radius);
+      border:1px solid var(--color-border-dark);
+    }
+    .mode-btn{
+      padding:var(--spacing-xs) var(--spacing-sm);
+      border:1px solid transparent;
+      border-radius:var(--border-radius-sm);
+      background:transparent;
+      color:var(--color-muted-dark);
+      cursor:pointer;
+      font-size:var(--font-size-xs);
+      font-weight:var(--font-weight-medium);
+      transition:all 0.2s;
+      flex:1;
+      text-align:center;
+    }
+    .mode-btn:hover{
+      background:rgba(148,163,184,0.1);
+    }
+    .mode-btn.active{
+      background:var(--color-agent-primary);
+      color:#FFF;
+      border-color:var(--color-agent-primary);
+    }
+    .mode-btn.smart{
+      color:#03C561;
+    }
+    .mode-btn.smart.active{
+      background:#03C561;
+      color:#FFF;
+    }
+    .mode-btn.free{
+      color:#00B8FF;
+    }
+    .mode-btn.free.active{
+      background:#00B8FF;
+      color:#FFF;
+    }
+    .mode-btn.rush{
+      color:#E4B402;
+    }
+    .mode-btn.rush.active{
+      background:#E4B402;
+      color:#FFF;
+    }
+    .mode-btn.plan{
+      color:#9333EA;
+    }
+    .mode-btn.plan.active{
+      background:#9333EA;
+      color:#FFF;
     }
     @media (max-width:1200px){
       #list{
@@ -684,6 +817,12 @@
         Following ${accountsSummary}. This archive lives only in your browser.<br>
         Auto-refresh: ~once per hour, one account every ~5 seconds.
       </div>
+      <div class="mode-selector">
+        <button class="mode-btn smart active" onclick="window.setAgentMode('smart')">SMART</button>
+        <button class="mode-btn free" onclick="window.setAgentMode('free')">FREE</button>
+        <button class="mode-btn rush" onclick="window.setAgentMode('rush')">RUSH</button>
+        <button class="mode-btn plan" onclick="window.setAgentMode('plan')">PLAN</button>
+      </div>
       <div id="uid-status"></div>
       <div class="controls">
         <button onclick="window.validateAllUids()">Validate All UIDs</button>
@@ -717,6 +856,55 @@
         topPanelEl.classList.add('visible');
       }
     };
+
+    // Agent mode management
+    const AGENT_MODE_KEY = "weibo_agent_mode_v1";
+    
+    function loadAgentMode() {
+      try {
+        return localStorage.getItem(AGENT_MODE_KEY) || 'smart';
+      } catch (e) {
+        console.error("WeiboTimeline: failed to load agent mode", e);
+        return 'smart';
+      }
+    }
+    
+    function saveAgentMode(mode) {
+      try {
+        localStorage.setItem(AGENT_MODE_KEY, mode);
+      } catch (e) {
+        console.error("WeiboTimeline: failed to save agent mode", e);
+      }
+    }
+    
+    tab.window.setAgentMode = function(mode) {
+      // Update body data attribute
+      doc.body.setAttribute('data-agent-mode', mode);
+      
+      // Update button active states
+      const modeButtons = doc.querySelectorAll('.mode-btn');
+      modeButtons.forEach(btn => {
+        btn.classList.remove('active');
+        if (btn.classList.contains(mode)) {
+          btn.classList.add('active');
+        }
+      });
+      
+      // Save to localStorage
+      saveAgentMode(mode);
+      
+      pageLog("AGENT_MODE_CHANGED", { mode });
+    };
+    
+    // Initialize agent mode
+    const initialMode = loadAgentMode();
+    doc.body.setAttribute('data-agent-mode', initialMode);
+    const initialModeBtn = doc.querySelector('.mode-btn.' + initialMode);
+    if (initialModeBtn) {
+      const allModeBtns = doc.querySelectorAll('.mode-btn');
+      allModeBtns.forEach(btn => btn.classList.remove('active'));
+      initialModeBtn.classList.add('active');
+    }
 
     function pageLog(label, data) {
       const now = new Date();
