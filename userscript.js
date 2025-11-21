@@ -378,26 +378,79 @@
   <meta charset="utf-8">
   <title>Weibo Timeline</title>
   <style>
+    :root {
+      /* Color Design Tokens */
+      --color-primary: #000;
+      --color-secondary: #F5F5F5;
+      --color-background: #FFF;
+      --color-accent: #007BFF;
+      --color-muted: #888;
+      --color-border: #EBEBEB;
+      --color-shadow: rgba(0,0,0,0.1);
+      
+      /* Dark theme adaptations */
+      --color-primary-dark: #e5e7eb;
+      --color-secondary-dark: #020617;
+      --color-background-dark: #0f172a;
+      --color-accent-dark: #2563eb;
+      --color-muted-dark: #9ca3af;
+      --color-border-dark: rgba(148,163,184,0.25);
+      --color-shadow-dark: rgba(15,23,42,0.6);
+      
+      /* Typography Design Tokens */
+      --font-family-base: 'Inter', 'Roboto', 'Segoe UI', Arial, sans-serif;
+      --font-family-mono: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --font-size-h1: 48px;
+      --font-size-h2: 32px;
+      --font-size-body: 16px;
+      --font-size-small: 13px;
+      --font-size-xs: 11px;
+      --font-weight-bold: 700;
+      --font-weight-semibold: 600;
+      --font-weight-medium: 500;
+      --font-weight-regular: 400;
+      --line-height-heading: 1.2;
+      --line-height-body: 1.5;
+      --letter-spacing: 0.1px;
+      
+      /* Spacing Design Tokens */
+      --spacing-xs: 4px;
+      --spacing-sm: 8px;
+      --spacing-md: 16px;
+      --spacing-lg: 24px;
+      --spacing-xl: 32px;
+      --border-radius-sm: 4px;
+      --border-radius: 8px;
+      --border-radius-lg: 12px;
+      --border-radius-xl: 14px;
+      --border-radius-full: 999px;
+      
+      /* Shadow Design Tokens */
+      --shadow-sm: 0 6px 12px rgba(0,0,0,0.1);
+      --shadow-md: 0 6px 20px rgba(15,23,42,0.6);
+      --shadow-lg: 0 8px 25px rgba(15,23,42,0.8);
+    }
+    
     body{
-      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-      background:#020617;
+      font-family:var(--font-family-base);
+      background:var(--color-background-dark);
       margin:0;
       padding:0;
-      color:#e5e7eb;
+      color:var(--color-primary-dark);
       min-height:100vh;
     }
     .toggle-panel{
       position:fixed;
-      top:20px;
-      right:20px;
+      top:var(--spacing-lg);
+      right:var(--spacing-lg);
       z-index:1000;
     }
     .toggle-btn{
-      padding:8px 16px;
-      border:1px solid rgba(148,163,184,0.3);
-      border-radius:6px;
+      padding:var(--spacing-sm) var(--spacing-md);
+      border:1px solid var(--color-border-dark);
+      border-radius:var(--border-radius);
       background:rgba(37,99,235,0.1);
-      color:#e5e7eb;
+      color:var(--color-primary-dark);
       cursor:pointer;
       font-size:12px;
       transition:all 0.2s;
@@ -414,7 +467,7 @@
       background:rgba(2,6,23,0.95);
       backdrop-filter:blur(10px);
       border-bottom:1px solid rgba(148,163,184,0.2);
-      padding:20px;
+      padding:var(--spacing-lg);
       z-index:999;
       transform:translateY(-100%);
       transition:transform 0.3s ease-in-out;
@@ -427,38 +480,38 @@
     .wrap{
       width:100%;
       max-width:none;
-      padding:20px;
+      padding:var(--spacing-lg);
       padding-top:80px;
     }
     h1{
-      margin:0 0 4px 0;
+      margin:0 0 var(--spacing-xs) 0;
       font-size:20px;
-      font-weight:600;
-      color:#e5e7eb;
+      font-weight:var(--font-weight-semibold);
+      color:var(--color-primary-dark);
     }
     .subtitle{
       font-size:12px;
-      color:#9ca3af;
-      margin-bottom:8px;
+      color:var(--color-muted-dark);
+      margin-bottom:var(--spacing-sm);
     }
     #status{
       font-size:12px;
-      color:#9ca3af;
-      margin-bottom:8px;
+      color:var(--color-muted-dark);
+      margin-bottom:var(--spacing-sm);
     }
     #uid-status{
-      font-size:11px;
-      color:#9ca3af;
-      margin-bottom:8px;
-      padding:8px;
+      font-size:var(--font-size-xs);
+      color:var(--color-muted-dark);
+      margin-bottom:var(--spacing-sm);
+      padding:var(--spacing-sm);
       background:rgba(148,163,184,0.1);
-      border-radius:6px;
+      border-radius:var(--border-radius);
     }
     .uid-status-item{
       display:inline-block;
       margin-right:12px;
       padding:2px 6px;
-      border-radius:3px;
+      border-radius:var(--border-radius-sm);
       font-size:10px;
     }
     .uid-status-item.valid{
@@ -478,44 +531,44 @@
       color:#6b7280;
     }
     #log{
-      font-family:SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
-      font-size:11px;
+      font-family:var(--font-family-mono);
+      font-size:var(--font-size-xs);
       white-space:pre-wrap;
-      background:#020617;
+      background:var(--color-secondary-dark);
       border-radius:10px;
       padding:6px 8px;
-      margin-bottom:12px;
+      margin-bottom:var(--spacing-md);
       max-height:140px;
       overflow:auto;
       border:1px solid rgba(148,163,184,0.3);
     }
     #log .line{
       padding:1px 0;
-      color:#9ca3af;
+      color:var(--color-muted-dark);
     }
     #list{
       columns:4 320px;
-      column-gap:16px;
+      column-gap:var(--spacing-md);
       margin-top:0;
     }
     .item{
-      background:#020617;
-      border-radius:14px;
-      padding:12px;
-      border:1px solid rgba(148,163,184,0.25);
-      box-shadow:0 6px 20px rgba(15,23,42,0.6);
+      background:var(--color-secondary-dark);
+      border-radius:var(--border-radius-xl);
+      padding:var(--spacing-md);
+      border:1px solid var(--color-border-dark);
+      box-shadow:var(--shadow-md);
       break-inside:avoid;
-      margin-bottom:16px;
+      margin-bottom:var(--spacing-md);
       transition:all 0.2s;
     }
     .item:hover{
       border-color:rgba(248,250,252,0.6);
       transform:translateY(-2px);
-      box-shadow:0 8px 25px rgba(15,23,42,0.8);
+      box-shadow:var(--shadow-lg);
     }
     .meta{
-      font-size:11px;
-      color:#9ca3af;
+      font-size:var(--font-size-xs);
+      color:var(--color-muted-dark);
       margin-bottom:6px;
       display:flex;
       gap:6px;
@@ -523,26 +576,26 @@
       flex-wrap:wrap;
     }
     .meta .name{
-      font-weight:500;
-      color:#e5e7eb;
+      font-weight:var(--font-weight-medium);
+      color:var(--color-primary-dark);
     }
     .meta .dot{
       opacity:0.5;
     }
     .text{
-      font-size:13px;
-      line-height:1.5;
-      color:#e5e7eb;
-      margin-bottom:8px;
+      font-size:var(--font-size-small);
+      line-height:var(--line-height-body);
+      color:var(--color-primary-dark);
+      margin-bottom:var(--spacing-sm);
     }
     .actions{
       display:flex;
       justify-content:flex-end;
     }
     .actions a{
-      font-size:11px;
+      font-size:var(--font-size-xs);
       padding:4px 10px;
-      border-radius:999px;
+      border-radius:var(--border-radius-full);
       border:1px solid rgba(59,130,246,0.8);
       text-decoration:none;
       color:#bfdbfe;
@@ -554,26 +607,26 @@
       border-color:rgba(191,219,254,1);
     }
     .empty{
-      font-size:13px;
+      font-size:var(--font-size-small);
       color:#6b7280;
-      padding:32px;
+      padding:var(--spacing-xl);
       text-align:center;
       grid-column:1/-1;
     }
     .controls{
-      margin-bottom:12px;
+      margin-bottom:var(--spacing-md);
       display:flex;
-      gap:8px;
+      gap:var(--spacing-sm);
       flex-wrap:wrap;
     }
     .controls button{
       padding:6px 12px;
-      border:1px solid rgba(148,163,184,0.3);
-      border-radius:6px;
+      border:1px solid var(--color-border-dark);
+      border-radius:var(--border-radius);
       background:rgba(37,99,235,0.1);
-      color:#e5e7eb;
+      color:var(--color-primary-dark);
       cursor:pointer;
-      font-size:11px;
+      font-size:var(--font-size-xs);
       transition:all 0.2s;
     }
     .controls button:hover{
@@ -593,7 +646,7 @@
         columns:2 320px;
       }
       .wrap{
-        padding:16px;
+        padding:var(--spacing-md);
         padding-top:80px;
       }
     }
@@ -872,15 +925,15 @@
       
       const content = doc.createElement('div');
       content.style.cssText = `
-        background: white; padding: 20px; border-radius: 8px; max-width: 600px;
-        max-height: 80vh; overflow-y: auto; margin: 20px;
+        background: var(--color-background); padding: var(--spacing-lg); border-radius: var(--border-radius); max-width: 600px;
+        max-height: 80vh; overflow-y: auto; margin: var(--spacing-lg);
       `;
       content.innerHTML = `
         <h3>Problematic UIDs Found</h3>
-        <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">${message}</pre>
+        <pre style="background: var(--color-secondary); padding: var(--spacing-sm); border-radius: var(--border-radius-sm); overflow-x: auto;">${message}</pre>
         <button onclick="window.closeModal()" style="
-          margin-top: 10px; padding: 8px 16px; border: none; border-radius: 4px;
-          background: #2563eb; color: white; cursor: pointer;
+          margin-top: var(--spacing-sm); padding: var(--spacing-sm) var(--spacing-md); border: none; border-radius: var(--border-radius-sm);
+          background: var(--color-accent-dark); color: var(--color-background); cursor: pointer;
         ">Close</button>
       `;
       
