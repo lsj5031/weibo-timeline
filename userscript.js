@@ -1,13 +1,15 @@
 // ==UserScript==
-// @name         Weibo Timeline (Hourly, Merged, Text-Only • v3.1)
+// @name         Weibo Timeline (Hourly, Merged, Text-Only • v3.3)
 // @namespace    http://tampermonkey.net/
-// @version      3.1
-// @description  Merged Weibo timeline: slow hourly polling, text-only UI, local archive, username-first display. More robust loop for many accounts.
+// @version      3.3
+// @description  Merged Weibo timeline: slow hourly polling, text-only UI, local archive, username-first display. Enhanced with proper timeline sorting, UID management, and resume functionality.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
 // @grant        GM
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      weibo.cn
 // @connect      weibo.com
 // @connect      m.weibo.cn
@@ -133,17 +135,22 @@
   // How often to complete a full cycle of all accounts
   const CYCLE_INTERVAL_MS   = 60 * 60 * 1000; // 1 hour
 
-  // LocalStorage key for the merged timeline
-  const TIMELINE_KEY = "weibo_timeline_v2";
-  
-  // LocalStorage key for tracking last processed UID
-  const LAST_UID_KEY = "weibo_last_uid_v2";
+  // LocalStorage keys
+  const TIMELINE_KEY = "weibo_timeline_v3";
+  const UID_HEALTH_KEY = "weibo_uid_health_v1";
+  const LAST_UID_KEY = "weibo_last_uid_v3";
 
   // Weibo mobile API endpoint
   const API_BASE = "https://m.weibo.cn/api/container/getIndex";
 
   // How many items to render at most (UI only; archive can be larger)
   const MAX_RENDER_ITEMS = 400;
+
+  // UID health tracking
+  const HEALTH_VALID = 'valid';
+  const HEALTH_INVALID = 'invalid';
+  const HEALTH_STALLED = 'stalled';
+  const HEALTH_UNKNOWN = 'unknown';
 
   // -------------------------------------------------------------------
   // UTILITIES
@@ -164,6 +171,24 @@
       localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
     } catch (e) {
       console.error("WeiboTimeline: failed to save timeline", e);
+    }
+  }
+
+  function loadUidHealth() {
+    try {
+      const raw = localStorage.getItem(UID_HEALTH_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      console.error("WeiboTimeline: failed to parse UID health", e);
+      return {};
+    }
+  }
+
+  function saveUidHealth(health) {
+    try {
+      localStorage.setItem(UID_HEALTH_KEY, JSON.stringify(health));
+    } catch (e) {
+      console.error("WeiboTimeline: failed to save UID health", e);
     }
   }
 
@@ -205,6 +230,46 @@
   function truncate(str, max) {
     if (!str) return "";
     return str.length > max ? str.slice(0, max) + "…" : str;
+  }
+
+  function parseWeiboTime(timeString) {
+    if (!timeString) return 0;
+    
+    try {
+      // Parse Weibo time format: "Wed Nov 20 10:30:00 +0800 2024"
+      const match = timeString.match(/\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\+\d{4}\s+\d{4}/);
+      if (match) {
+        return new Date(match[0]).getTime() || 0;
+      }
+      
+      // Fallback to generic parsing
+      return new Date(timeString).getTime() || 0;
+    } catch (error) {
+      console.warn('Failed to parse time:', timeString, error);
+      return 0;
+    }
+  }
+
+  function validateUid(uid) {
+    if (!uid) return false;
+    
+    // Basic validation: numeric and reasonable length
+    return /^\d{6,11}$/.test(uid);
+  }
+
+  function updateUidHealth(uid, status) {
+    const health = loadUidHealth();
+    health[uid] = {
+      status,
+      lastChecked: Date.now(),
+      lastSuccess: status === HEALTH_VALID ? Date.now() : (health[uid]?.lastSuccess || null)
+    };
+    saveUidHealth(health);
+  }
+
+  function getUidHealth(uid) {
+    const health = loadUidHealth();
+    return health[uid] || { status: HEALTH_UNKNOWN, lastChecked: null, lastSuccess: null };
   }
 
   // -------------------------------------------------------------------
@@ -342,6 +407,37 @@
       color:#9ca3af;
       margin-bottom:8px;
     }
+    #uid-status{
+      font-size:11px;
+      color:#9ca3af;
+      margin-bottom:8px;
+      padding:8px;
+      background:rgba(148,163,184,0.1);
+      border-radius:6px;
+    }
+    .uid-status-item{
+      display:inline-block;
+      margin-right:12px;
+      padding:2px 6px;
+      border-radius:3px;
+      font-size:10px;
+    }
+    .uid-status-item.valid{
+      background:#d1fae5;
+      color:#065f46;
+    }
+    .uid-status-item.invalid{
+      background:#fee2e2;
+      color:#991b1b;
+    }
+    .uid-status-item.stalled{
+      background:#fef3c7;
+      color:#92400e;
+    }
+    .uid-status-item.unknown{
+      background:#e5e7eb;
+      color:#6b7280;
+    }
     #log{
       font-family:SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
       font-size:11px;
@@ -418,6 +514,28 @@
       padding:16px 4px;
       text-align:center;
     }
+    .controls{
+      margin-bottom:12px;
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+    .controls button{
+      padding:6px 12px;
+      border:1px solid rgba(148,163,184,0.3);
+      border-radius:6px;
+      background:rgba(37,99,235,0.1);
+      color:#e5e7eb;
+      cursor:pointer;
+      font-size:11px;
+    }
+    .controls button:hover{
+      background:rgba(37,99,235,0.2);
+    }
+    .controls button:disabled{
+      opacity:0.5;
+      cursor:not-allowed;
+    }
   </style>
 </head>
 <body>
@@ -426,6 +544,13 @@
     <div class="subtitle">
       Following ${accountsSummary}. This archive lives only in your browser.<br>
       Auto-refresh: ~once per hour, one account every ~5 seconds.
+    </div>
+    <div id="uid-status"></div>
+    <div class="controls">
+      <button onclick="validateAllUids()">Validate All UIDs</button>
+      <button onclick="exportUidHealth()">Export UID Health</button>
+      <button onclick="showUidManagement()">Manage UIDs</button>
+      <button onclick="clearInvalidUids()">Clear Invalid UIDs</button>
     </div>
     <div id="status"></div>
     <div id="log"></div>
@@ -438,6 +563,7 @@
     const listEl   = doc.getElementById("list");
     const logEl    = doc.getElementById("log");
     const statusEl = doc.getElementById("status");
+    const uidStatusEl = doc.getElementById("uid-status");
 
     function pageLog(label, data) {
       const now = new Date();
@@ -469,8 +595,25 @@
       if (statusEl) statusEl.textContent = message;
     }
 
+    function updateUidStatus() {
+      const health = loadUidHealth();
+      const total = USERS.length;
+      const valid = Object.values(health).filter(h => h.status === HEALTH_VALID).length;
+      const invalid = Object.values(health).filter(h => h.status === HEALTH_INVALID).length;
+      const stalled = Object.values(health).filter(h => h.status === HEALTH_STALLED).length;
+      const unknown = total - valid - invalid - stalled;
+      
+      uidStatusEl.innerHTML = `
+        <span class="uid-status-item valid">Valid: ${valid}</span>
+        <span class="uid-status-item invalid">Invalid: ${invalid}</span>
+        <span class="uid-status-item stalled">Stalled: ${stalled}</span>
+        <span class="uid-status-item unknown">Unknown: ${unknown}</span>
+      `;
+    }
+
     // Load existing timeline from localStorage
     let timeline = loadTimeline();
+    updateUidStatus();
     pageLog("Dashboard opened", {
       accounts: USERS.length,
       storedEntries: Object.keys(timeline).length
@@ -493,7 +636,13 @@
         return;
       }
 
-      entries.sort((a, b) => (b.created_ts || 0) - (a.created_ts || 0));
+      // Sort by actual post creation time (FIXED)
+      entries.sort((a, b) => {
+        const timeA = parseWeiboTime(a.createdAt);
+        const timeB = parseWeiboTime(b.createdAt);
+        return timeB - timeA;
+      });
+      
       const limited = entries.slice(0, MAX_RENDER_ITEMS);
 
       listEl.innerHTML = "";
@@ -548,6 +697,119 @@
       });
     }
 
+    // ---------------------------------------------------------------
+    // UID MANAGEMENT FUNCTIONS
+    // ---------------------------------------------------------------
+
+    function validateAllUids() {
+      setStatus("Validating all UIDs...");
+      let checked = 0;
+      
+      USERS.forEach(async (uid, index) => {
+        setStatus(`Validating UID ${index + 1}/${USERS.length}: ${uid}`);
+        try {
+          const json = await fetchUserPosts(uid, pageLog);
+          
+          if (json && json.ok === 1 && json.data && Array.isArray(json.data.cards) && json.data.cards.length > 0) {
+            updateUidHealth(uid, HEALTH_VALID);
+            pageLog("UID_VALID", { uid, cardsFound: json.data.cards.length });
+          } else {
+            updateUidHealth(uid, HEALTH_INVALID);
+            pageLog("UID_INVALID", { uid, reason: "No valid cards found" });
+          }
+        } catch (error) {
+          updateUidHealth(uid, HEALTH_INVALID);
+          pageLog("UID_ERROR", { uid, error: error.message });
+        }
+        
+        checked++;
+        
+        if (checked < USERS.length) {
+          await sleep(BETWEEN_ACCOUNTS_MS);
+        }
+      });
+      
+      setStatus("Validation complete");
+      updateUidStatus();
+    }
+
+    function exportUidHealth() {
+      const health = loadUidHealth();
+      const data = {
+        exportDate: new Date().toISOString(),
+        totalUids: USERS.length,
+        health: health
+      };
+      
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      
+      const a = doc.createElement('a');
+      a.href = url;
+      a.download = `weibo-uid-health-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      
+      URL.revokeObjectURL(url);
+      pageLog("UID health exported");
+    }
+
+    function showUidManagement() {
+      const health = loadUidHealth();
+      const invalidUids = USERS.filter(uid => {
+        const h = health[uid];
+        return !h || h.status === HEALTH_INVALID || h.status === HEALTH_STALLED;
+      });
+      
+      if (invalidUids.length === 0) {
+        alert("No invalid or stalled UIDs found. All UIDs appear to be working correctly.");
+        return;
+      }
+      
+      const message = `Found ${invalidUids.length} problematic UIDs:\n\n` + 
+        invalidUids.map(uid => {
+          const h = health[uid];
+          const status = h?.status || HEALTH_UNKNOWN;
+          const lastChecked = h?.lastChecked ? new Date(h.lastChecked).toLocaleString() : 'Never';
+          return `${uid}: ${status} (last checked: ${lastChecked})`;
+        }).join('\n') + '\n\nThese UIDs can be safely removed from the USERS array in the script.';
+      
+      const modal = doc.createElement('div');
+      modal.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center;
+        z-index: 10000;
+      `;
+      
+      const content = doc.createElement('div');
+      content.style.cssText = `
+        background: white; padding: 20px; border-radius: 8px; max-width: 600px;
+        max-height: 80vh; overflow-y: auto; margin: 20px;
+      `;
+      content.innerHTML = `
+        <h3>Problematic UIDs Found</h3>
+        <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">${message}</pre>
+        <button onclick="this.parentElement.parentElement.remove()" style="
+          margin-top: 10px; padding: 8px 16px; border: none; border-radius: 4px;
+          background: #2563eb; color: white; cursor: pointer;
+        ">Close</button>
+      `;
+      
+      modal.appendChild(content);
+      doc.body.appendChild(modal);
+    }
+
+    function clearInvalidUids() {
+      if (!confirm(`Remove all invalid and stalled UIDs from the script? This will require manually editing the userscript file.`)) {
+        pageLog("MANUAL_UID_REMOVAL", { 
+          message: "User must manually remove invalid UIDs from USERS array" 
+        });
+        alert(`To remove invalid UIDs:\n\n1. Open the userscript in Tampermonkey\n2. Find the USERS array\n3. Remove these UIDs: ${USERS.filter(uid => {
+          const h = loadUidHealth()[uid];
+          return h && (h.status === HEALTH_INVALID || h.status === HEALTH_STALLED);
+        }).join(', ')}\n\n4. Save the script\n\nThe UID health data will remain for reference.`);
+      }
+    }
+
     // Initial render
     renderTimeline();
 
@@ -563,6 +825,7 @@
 
         if (!json || json.ok !== 1 || !json.data || !Array.isArray(json.data.cards)) {
           pageLog("API_NOT_OK", { uid, ok: json && json.ok });
+          updateUidHealth(uid, HEALTH_INVALID);
           return;
         }
 
@@ -593,7 +856,7 @@
             (tmp.textContent || tmp.innerText || "").trim();
 
           const createdAt  = mblog.created_at || "";
-          const created_ts = Date.now();
+          const created_ts = parseWeiboTime(createdAt); // FIXED: Parse actual post time
           const link       = "https://weibo.com/" + uid + "/" + bid;
 
           timeline[key] = {
@@ -611,6 +874,7 @@
         });
 
         if (added > 0) {
+          updateUidHealth(uid, HEALTH_VALID);
           saveTimeline(timeline);
           pageLog("PROCESS_DONE", {
             uid,
@@ -618,8 +882,14 @@
             totalEntries: Object.keys(timeline).length
           });
           renderTimeline();
+          updateUidStatus();
         } else {
           pageLog("PROCESS_DONE", { uid, added: 0 });
+          // Mark as stalled if no new posts but API was successful
+          const existingHealth = getUidHealth(uid);
+          if (existingHealth.status !== HEALTH_VALID) {
+            updateUidHealth(uid, HEALTH_STALLED);
+          }
         }
 
         // Save this UID as the last successfully processed
@@ -630,11 +900,12 @@
           uid,
           error: err && err.message ? err.message : String(err)
         });
+        updateUidHealth(uid, HEALTH_INVALID);
       }
     }
 
     // ---------------------------------------------------------------
-    // AUTO-REFRESH LOOP (HOURLY CYCLES, WITH FULL TRY/CATCH)
+    // AUTO-REFRESH LOOP (HOURLY CYCLES, WITH FULL TRY/CATCH AND RESUME)
     // ---------------------------------------------------------------
 
     (async function runAutoRefresh() {
@@ -720,6 +991,27 @@
         }
       }
     })();
+  });
+
+  // Additional menu command for UID management
+  GM_registerMenuCommand("🔧 UID Management", function () {
+    const health = loadUidHealth();
+    const total = USERS.length;
+    const valid = Object.values(health).filter(h => h.status === HEALTH_VALID).length;
+    const invalid = Object.values(health).filter(h => h.status === HEALTH_INVALID).length;
+    const stalled = Object.values(health).filter(h => h.status === HEALTH_STALLED).length;
+    const unknown = total - valid - invalid - stalled;
+    
+    const message = `UID Health Summary:\n\n` +
+      `Total UIDs: ${total}\n` +
+      `Valid: ${valid}\n` +
+      `Invalid: ${invalid}\n` +
+      `Stalled: ${stalled}\n` +
+      `Unknown: ${unknown}\n\n` +
+      `Last checked: ${new Date().toLocaleString()}\n\n` +
+      `Use the main dashboard to manage UIDs.`;
+    
+    alert(message);
   });
 
 })();
