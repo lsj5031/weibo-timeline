@@ -147,8 +147,10 @@
   // Weibo mobile API endpoint
   const API_BASE = "https://m.weibo.cn/api/container/getIndex";
 
-  // How many items to render at most (UI only; archive can be larger)
-  const MAX_RENDER_ITEMS = 400;
+  // Pagination configuration
+  const PAGE_SIZE = 50;
+  const MAX_STORED_POSTS = 3000; // Hard limit for LocalStorage (safe for 5MB quota)
+  let currentRenderCount = PAGE_SIZE;
 
   // Image download controls
   const IMAGE_DOWNLOAD_CONCURRENCY = 3;
@@ -463,6 +465,21 @@
       console.warn('Failed to parse time:', timeString, error);
       return 0;
     }
+  }
+
+  function timeAgo(timestamp) {
+    const seconds = Math.floor((new Date() - timestamp) / 1000);
+    let interval = seconds / 31536000;
+    if (interval > 1) return Math.floor(interval) + "y ago";
+    interval = seconds / 2592000;
+    if (interval > 1) return Math.floor(interval) + "mo ago";
+    interval = seconds / 86400;
+    if (interval > 1) return Math.floor(interval) + "d ago";
+    interval = seconds / 3600;
+    if (interval > 1) return Math.floor(interval) + "h ago";
+    interval = seconds / 60;
+    if (interval > 1) return Math.floor(interval) + "m ago";
+    return "Just now";
   }
 
   function validateUid(uid) {
@@ -968,10 +985,19 @@
     .images{
       display:grid;
       grid-template-columns:repeat(2,1fr);
-      gap:var(--spacing-xs);
+      gap:2px;
       margin:var(--spacing-sm) 0;
       border-radius:var(--border-radius);
       overflow:hidden;
+    }
+    .images.count-1{
+      grid-template-columns:1fr;
+    }
+    .images.count-3 .image-container:first-child{
+      grid-column:span 2;
+    }
+    .images.count-5, .images.count-6, .images.count-7, .images.count-8, .images.count-9{
+      grid-template-columns:repeat(3,1fr);
     }
     .images.single{
       grid-template-columns:1fr;
@@ -996,10 +1022,45 @@
     .post-image:hover{
       transform:scale(1.05);
     }
+    /* Lightbox Styles */
+    #lightbox{
+      position:fixed;
+      top:0;
+      left:0;
+      width:100%;
+      height:100%;
+      background:rgba(0,0,0,0.9);
+      z-index:10000;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      opacity:0;
+      pointer-events:none;
+      transition:opacity 0.2s;
+    }
+    #lightbox.active{
+      opacity:1;
+      pointer-events:auto;
+    }
+    #lightbox img{
+      max-width:95%;
+      max-height:95%;
+      box-shadow:0 0 20px rgba(0,0,0,0.5);
+      border-radius:4px;
+    }
+    #lightbox .close{
+      position:absolute;
+      top:20px;
+      right:30px;
+      color:#fff;
+      font-size:40px;
+      cursor:pointer;
+      user-select:none;
+    }
     .item:hover{
       border-color:var(--color-agent-primary);
-      transform:translateY(-2px);
-      box-shadow:0 4px 12px var(--color-shadow-current);
+      transform:translateY(-4px);
+      z-index:10;
     }
     .meta{
       font-size:var(--font-size-xs);
@@ -1028,6 +1089,15 @@
     .actions{
       display:flex;
       justify-content:flex-end;
+      opacity:0;
+      transform:translateY(10px);
+      transition:all 0.2s ease;
+      margin-top:-30px;
+    }
+    .item:hover .actions{
+      opacity:1;
+      transform:translateY(0);
+      margin-top:0;
     }
     .actions a{
       font-size:var(--font-size-xs);
@@ -1200,10 +1270,36 @@
   
   <div class="wrap">
     <div id="list"></div>
+    <div id="footer" style="text-align: center; padding: 40px; display: none;">
+        <button id="load-more-btn" onclick="window.loadMore()" style="
+            padding: 12px 30px; 
+            background: var(--color-agent-primary); 
+            color: white; 
+            border: none; 
+            border-radius: 30px; 
+            font-size: 16px; 
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        ">Load More Posts</button>
+    </div>
   </div>
 </body>
 </html>`);
     doc.close();
+
+    // Append Lightbox Container to body
+    const lightbox = doc.createElement('div');
+    lightbox.id = 'lightbox';
+    lightbox.innerHTML = '<span class="close">&times;</span><img src="" id="lightbox-img">';
+    doc.body.appendChild(lightbox);
+
+    const lightboxImg = lightbox.querySelector('img');
+    const closeBtn = lightbox.querySelector('.close');
+
+    // Close handlers
+    lightbox.onclick = (e) => { if(e.target !== lightboxImg) lightbox.classList.remove('active'); };
+    closeBtn.onclick = () => lightbox.classList.remove('active');
+    doc.addEventListener('keydown', (e) => { if(e.key === "Escape") lightbox.classList.remove('active'); });
 
     const listEl   = doc.getElementById("list");
     const logEl    = doc.getElementById("log");
@@ -1465,7 +1561,17 @@
         return timeB - timeA;
       });
       
-      const limited = entries.slice(0, MAX_RENDER_ITEMS);
+      // Show/hide footer based on whether there are more items to load
+      const footer = doc.getElementById('footer');
+      if (footer) {
+        if (entries.length > currentRenderCount) {
+          footer.style.display = 'block';
+        } else {
+          footer.style.display = 'none';
+        }
+      }
+
+      const limited = entries.slice(0, currentRenderCount);
       const downloadedImages = getImagesCache();
 
       listEl.innerHTML = "";
@@ -1493,7 +1599,8 @@
         if (entry.createdAt) {
           const timeSpan = doc.createElement("span");
           timeSpan.className = "time";
-          timeSpan.textContent = entry.createdAt;
+          timeSpan.textContent = timeAgo(entry.created_ts);
+          timeSpan.title = entry.createdAt; // Show full date on hover
           meta.appendChild(timeSpan);
         }
 
@@ -1505,7 +1612,7 @@
         if (entry.images && entry.images.length > 0) {
           console.log("[WeiboTimeline] Rendering images for entry:", entry.key, "count:", entry.images.length);
           const imagesDiv = doc.createElement("div");
-          imagesDiv.className = entry.images.length === 1 ? "images single" : "images";
+          imagesDiv.className = "images count-" + entry.images.length;
 
           entry.images.forEach((image, index) => {
             console.log("[WeiboTimeline] Rendering image:", image.key, "url:", image.url);
@@ -1548,8 +1655,8 @@
             }
 
             img.onclick = () => {
-              // Open full size image in new tab
-              tab.window.open(image.url, '_blank');
+              lightboxImg.src = img.src;
+              lightbox.classList.add('active');
             };
 
             imgContainer.appendChild(img);
@@ -1857,6 +1964,12 @@
       }
     }
 
+    // Add the "Load More" functionality
+    tab.window.loadMore = function() {
+      currentRenderCount += PAGE_SIZE;
+      renderTimeline(); // Re-render with higher limit
+    };
+
     // Initial render
     renderTimeline();
 
@@ -1925,6 +2038,30 @@
         });
 
         if (added > 0) {
+          // --- AUTO-PRUNING LOGIC (Solution 1) ---
+          const allKeys = Object.keys(timeline);
+          
+          if (allKeys.length > MAX_STORED_POSTS) {
+            // Sort keys by creation time (Oldest first)
+            allKeys.sort((a, b) => {
+              return (timeline[a].created_ts || 0) - (timeline[b].created_ts || 0);
+            });
+
+            // Calculate how many to delete
+            const deleteCount = allKeys.length - MAX_STORED_POSTS;
+            
+            // Delete the oldest ones
+            for (let k = 0; k < deleteCount; k++) {
+              delete timeline[allKeys[k]];
+            }
+            
+            pageLog("PRUNED_POSTS", { 
+              deletedCount: deleteCount, 
+              remainingCount: MAX_STORED_POSTS 
+            });
+          }
+          // ---------------------------
+
           updateUidHealth(uid, HEALTH_VALID);
           saveTimeline(timeline);
           pageLog("PROCESS_DONE", {
