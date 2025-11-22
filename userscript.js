@@ -13,7 +13,9 @@
 // @connect      weibo.cn
 // @connect      weibo.com
 // @connect      m.weibo.cn
+// @connect      sinaimg.cn
 // @connect      *
+// @run-at       document-end
 // ==/UserScript==
 
 (function () {
@@ -515,113 +517,85 @@
     return new Promise((resolve, reject) => {
       log("REQUEST", { uid, logLabel, url });
 
-      let requestHandle = null;
-      let timeoutHandle = null;
       let completed = false;
+      let timeoutHandle = null;
 
-      // Failsafe timeout in case GM_xmlhttpRequest doesn't fire callbacks
-      timeoutHandle = setTimeout(() => {
-        if (!completed) {
-          completed = true;
-          log("FAILSAFE_TIMEOUT", { uid, logLabel });
-          if (requestHandle && requestHandle.abort) {
-            try {
-              requestHandle.abort();
-            } catch (e) {
-              log("ABORT_ERROR", { uid, error: e.message });
-            }
-          }
-          reject(new Error("Request timeout (failsafe)"));
-        }
-      }, 30000); // 30 second failsafe
-
-      try {
-        requestHandle = gmRequest({
-          method: "GET",
-          url,
-          timeout: 15000,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://m.weibo.cn/",
-            "Accept": "application/json, text/plain, */*"
-          },
-          onload: (response) => {
-            if (completed) return;
-            completed = true;
-            clearTimeout(timeoutHandle);
-
-            log("ONLOAD", {
-              uid,
-              logLabel,
-              status: response.status,
-              finalUrl: response.finalUrl || ""
-            });
-
-            if (response.status < 200 || response.status >= 300) {
-              reject(new Error("HTTP " + response.status));
-              return;
-            }
-
-            let json;
-            try {
-              json = JSON.parse(response.responseText);
-            } catch (e) {
-              log("JSON_PARSE_ERROR", { uid, logLabel, message: e.message });
-              reject(new Error("JSON parse error"));
-              return;
-            }
-
-            log("JSON_META", {
-              uid,
-              logLabel,
-              ok: json.ok,
-              hasData: !!json.data,
-              cardsLen:
-                json.data && Array.isArray(json.data.cards)
-                  ? json.data.cards.length
-                  : null
-            });
-
-            resolve(json);
-          },
-          onerror: (response) => {
-            if (completed) return;
-            completed = true;
-            clearTimeout(timeoutHandle);
-
-            log("ONERROR", {
-              uid,
-              logLabel,
-              status: response && response.status,
-              readyState: response && response.readyState,
-              finalUrl: (response && response.finalUrl) || "",
-              error: response && response.error
-            });
-            reject(new Error("Network error"));
-          },
-          ontimeout: (response) => {
-            if (completed) return;
-            completed = true;
-            clearTimeout(timeoutHandle);
-
-            log("TIMEOUT", {
-              uid,
-              logLabel,
-              status: response && response.status,
-              finalUrl: (response && response.finalUrl) || ""
-            });
-            reject(new Error("Timeout"));
-          }
-        });
-
-        log("REQUEST_INITIATED", { uid, logLabel, hasHandle: !!requestHandle });
-      } catch (error) {
+      const finalize = (type, response) => {
         if (completed) return;
         completed = true;
-        clearTimeout(timeoutHandle);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
 
-        log("REQUEST_ERROR", { uid, logLabel, error: error.message });
-        reject(new Error("Failed to initiate request: " + error.message));
+        if (type === "TIMEOUT" || type === "FAILSAFE") {
+            log("TIMEOUT_ERROR", { uid, type });
+            reject(new Error("Request timed out"));
+            return;
+        }
+
+        if (type === "ERROR") {
+            log("NETWORK_ERROR", { uid, error: response });
+            reject(new Error("Network Error"));
+            return;
+        }
+
+        // Success handling
+        log("ONLOAD", {
+          uid,
+          logLabel,
+          status: response.status,
+          finalUrl: response.finalUrl || ""
+        });
+
+        if (response.status !== 200) {
+           // Weibo sometimes returns 418 or 403 if scraping too fast
+           reject(new Error("HTTP " + response.status)); 
+           return;
+        }
+
+        try {
+          const json = JSON.parse(response.responseText);
+          if (json.ok !== 1) {
+              // Soft error from Weibo (e.g., "containerid not found")
+              log("API_LOGIC_WARN", { uid, msg: json.msg || "ok!=1" });
+          }
+          resolve(json);
+        } catch (e) {
+          log("JSON_PARSE_ERROR", { uid, logLabel, textLen: response.responseText?.length });
+          reject(new Error("JSON parse error"));
+        }
+      };
+
+      // 1. Failsafe timer (Script side)
+      timeoutHandle = setTimeout(() => {
+        finalize("FAILSAFE", null);
+      }, 20000); 
+
+      try {
+        gmRequest({
+          method: "GET",
+          url: url,
+          // 2. GM Timeout (Network side)
+          timeout: 15000, 
+          // 3. Crucial Headers for Weibo
+          headers: {
+            "X-Requested-With": "XMLHttpRequest",
+            "X-XSRF-TOKEN": "", // Sometimes helps bypass checks
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1",
+            "Referer": "https://m.weibo.cn/u/" + uid,
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin"
+          },
+          // 4. Ensure cookies are sent
+          anonymous: false, 
+          onload: (resp) => finalize("LOAD", resp),
+          onerror: (resp) => finalize("ERROR", resp),
+          ontimeout: (resp) => finalize("TIMEOUT", resp)
+        });
+
+        log("REQUEST_INITIATED", { uid, logLabel, hasHandle: true });
+      } catch (error) {
+        finalize("ERROR", error.message);
       }
     });
   }
