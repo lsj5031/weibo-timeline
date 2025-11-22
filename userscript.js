@@ -301,24 +301,42 @@
     }
   }
 
-  function startImageDownload(task) {
+  // Helper to wait before retrying
+  const wait = (ms) => new Promise(res => setTimeout(res, ms));
+
+  function startImageDownload(task, attempt = 1) {
     const { url, key, resolve, reject } = task;
+    const MAX_ATTEMPTS = 3;
+
     activeImageDownloads++;
     
-    // Safety cleanup function
     const finalize = () => {
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
       processImageDownloadQueue();
+    };
+
+    const handleRetry = async (errorMsg) => {
+      activeImageDownloads = Math.max(0, activeImageDownloads - 1); // Free up slot while waiting
+      
+      if (attempt < MAX_ATTEMPTS) {
+        console.warn(`[WeiboTimeline] Image failed (${errorMsg}), retrying ${attempt}/${MAX_ATTEMPTS}: ${key}`);
+        await wait(1500 * attempt); // Exponential backoff (1.5s, 3s...)
+        // Re-queue the download
+        startImageDownload(task, attempt + 1);
+      } else {
+        console.error(`[WeiboTimeline] Image gave up after ${MAX_ATTEMPTS} attempts: ${key}`);
+        processImageDownloadQueue(); // Ensure queue continues
+        reject(new Error(errorMsg));
+      }
     };
 
     try {
       gmRequest({
         method: "GET",
         url: url,
-        responseType: "blob", // IMPORTANT: Get raw binary data
-        timeout: 15000,
+        responseType: "blob",
+        timeout: 30000, // Increased timeout to 30s
         headers: {
-          // CRITICAL: This tells Weibo we are authorized to see the image
           "Referer": "https://weibo.com/",
           "Origin": "https://weibo.com",
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -326,43 +344,32 @@
         onload: (response) => {
           if (response.status === 200) {
             try {
-              // Convert the raw binary download into a local browser URL
-              // This url looks like: blob:https://weibo.com/a1b2-c3d4...
               const blobUrl = URL.createObjectURL(response.response);
-
               const cache = getImagesCache();
               const record = {
-                url: blobUrl, // We display this local blob, not the weibo url
+                url: blobUrl,
                 originalUrl: url,
                 downloadedAt: Date.now()
               };
-
-              // Save to Memory Cache (RAM) only
               cache[key] = record;
-              
+              finalize();
               resolve(record);
             } catch (e) {
-              console.error("Blob creation failed", e);
-              reject(e);
+              handleRetry("Blob creation error");
             }
           } else {
-            reject(new Error("HTTP " + response.status));
+            handleRetry(`HTTP ${response.status}`);
           }
-          finalize();
         },
         onerror: (e) => {
-          console.error("Network error", e);
-          finalize();
-          reject(e);
+          handleRetry("Network error");
         },
         ontimeout: () => {
-          finalize();
-          reject(new Error("Timeout"));
+          handleRetry("Timeout");
         }
       });
     } catch (error) {
-      finalize();
-      reject(error);
+      handleRetry("Request Init Error");
     }
   }
 
@@ -932,24 +939,44 @@
       padding:1px 0;
       color:var(--color-muted-current);
     }
-    #list{
-      display:grid;
-      grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
-      gap:var(--spacing-md);
-      margin-top:0;
-      grid-auto-rows:min-content;
+    /* --- NEW LAYOUT CSS --- */
+    #list {
+      /* Remove Grid */
+      /* display: grid; */
+      /* grid-template-columns: ... */
+      
+      /* Add Columns (Pinterest Style) */
+      column-count: 4;
+      column-gap: var(--spacing-md);
+      margin-top: 0;
     }
-    .item{
-      background:var(--color-secondary-current);
-      border-radius:var(--border-radius-xl);
-      padding:var(--spacing-md);
-      border:1px solid var(--color-border-current);
-      box-shadow:0 2px 8px var(--color-shadow-current);
-      transition:all 0.2s;
-      grid-row:span auto;
-      min-height:120px;
-      display:flex;
-      flex-direction:column;
+
+    .item {
+      background: var(--color-secondary-current);
+      border-radius: var(--border-radius-xl);
+      padding: var(--spacing-md);
+      border: 1px solid var(--color-border-current);
+      box-shadow: 0 2px 8px var(--color-shadow-current);
+      transition: all 0.2s;
+      
+      /* Crucial for Masonry: prevents item from splitting across columns */
+      break-inside: avoid; 
+      /* Ensures the box fills the column width */
+      width: 100%;
+      /* Displays as block to respect margins */
+      display: inline-block; 
+      margin-bottom: var(--spacing-md);
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 1400px) {
+      #list { column-count: 3; }
+    }
+    @media (max-width: 900px) {
+      #list { column-count: 2; }
+    }
+    @media (max-width: 600px) {
+      #list { column-count: 1; }
     }
     .images{
       display:grid;
