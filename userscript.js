@@ -246,41 +246,29 @@
     }
   }
 
+  // 1. Initialize empty object (do not read from localStorage)
   function loadImages() {
-    try {
-      const raw = localStorage.getItem(IMAGES_KEY);
-      return raw ? JSON.parse(raw) : {};
-    } catch (e) {
-      console.error("WeiboTimeline: failed to parse images", e);
-      return {};
-    }
+    return {}; 
   }
 
+  // 2. Disable saving (do not write to localStorage)
   function saveImages(images) {
-    try {
-      localStorage.setItem(IMAGES_KEY, JSON.stringify(images));
-    } catch (e) {
-      console.error("WeiboTimeline: failed to save images", e);
-    }
+    // Intentionally empty. 
+    // We cannot save Blobs to localStorage, and Base64 is too big.
+    // Images will re-download (fast) every time you refresh the dashboard.
   }
 
   const imageDownloadQueue = [];
   const pendingImageDownloads = new Map();
   let activeImageDownloads = 0;
   let imageDownloadsPaused = false;
+  // 3. Ensure the cache object exists
   let imagesCache = null;
-
   function getImagesCache() {
     if (!imagesCache) {
-      imagesCache = loadImages();
+      imagesCache = {};
     }
     return imagesCache;
-  }
-
-  function persistImagesCache() {
-    if (imagesCache) {
-      saveImages(imagesCache);
-    }
   }
 
   function pauseImageDownloads() {
@@ -316,102 +304,65 @@
   function startImageDownload(task) {
     const { url, key, resolve, reject } = task;
     activeImageDownloads++;
-    console.log("[WeiboTimeline] Image download started:", key, "Active downloads:", activeImageDownloads);
-
-    let completed = false;
-    let failsafeHandle = null;
-    let requestHandle = null;
-
+    
+    // Safety cleanup function
     const finalize = () => {
-      if (completed) return;
-      completed = true;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
-      console.log("[WeiboTimeline] Image download finalized:", key, "Active downloads:", activeImageDownloads);
       processImageDownloadQueue();
     };
 
-    const handleFailure = (error) => {
-      console.error("[WeiboTimeline] Image download failed:", key, error.message);
-      if (failsafeHandle) {
-        clearTimeout(failsafeHandle);
-      }
-      if (requestHandle && requestHandle.abort) {
-        try {
-          requestHandle.abort();
-        } catch (e) {
-          // ignore abort errors
-        }
-      }
-      finalize();
-      reject(error);
-    };
-
-    failsafeHandle = setTimeout(() => {
-      console.error("[WeiboTimeline] Image download failsafe timeout:", key);
-      handleFailure(new Error("Image download timeout (failsafe)"));
-    }, IMAGE_DOWNLOAD_FAILSAFE_MS);
-
     try {
-      console.log("[WeiboTimeline] Initiating GM_xmlhttpRequest for:", key, url);
-      requestHandle = gmRequest({
+      gmRequest({
         method: "GET",
-        url,
-        responseType: "blob",
-        timeout: 10000,
-        onload: (response) => {
-          console.log("[WeiboTimeline] Image download onload:", key, "status:", response.status);
-          clearTimeout(failsafeHandle);
-          if (completed) return;
-
-          try {
-            const reader = new FileReader();
-            reader.onload = () => {
-              try {
-                console.log("[WeiboTimeline] FileReader loaded for:", key);
-                const dataUrl = reader.result;
-                const cache = getImagesCache();
-                const record = {
-                  url: dataUrl,
-                  originalUrl: url,
-                  downloadedAt: Date.now()
-                };
-                cache[key] = record;
-                persistImagesCache();
-                console.log("[WeiboTimeline] Image successfully downloaded and cached:", key);
-                finalize();
-                resolve(record);
-              } catch (storeErr) {
-                console.error("[WeiboTimeline] Failed to store image:", key, storeErr);
-                finalize();
-                reject(new Error("Failed to store image: " + storeErr.message));
-              }
-            };
-            reader.onerror = () => {
-              console.error("[WeiboTimeline] FileReader error:", key);
-              finalize();
-              reject(new Error("Failed to read image data"));
-            };
-            console.log("[WeiboTimeline] Reading blob as data URL for:", key);
-            reader.readAsDataURL(response.response);
-          } catch (e) {
-            console.error("[WeiboTimeline] Failed to process image:", key, e);
-            finalize();
-            reject(new Error("Failed to process image: " + e.message));
-          }
+        url: url,
+        responseType: "blob", // IMPORTANT: Get raw binary data
+        timeout: 15000,
+        headers: {
+          // CRITICAL: This tells Weibo we are authorized to see the image
+          "Referer": "https://weibo.com/",
+          "Origin": "https://weibo.com",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         },
-        onerror: (response) => {
-          console.error("[WeiboTimeline] Image download onerror:", key, response);
-          handleFailure(new Error("Network error downloading image"));
+        onload: (response) => {
+          if (response.status === 200) {
+            try {
+              // Convert the raw binary download into a local browser URL
+              // This url looks like: blob:https://weibo.com/a1b2-c3d4...
+              const blobUrl = URL.createObjectURL(response.response);
+
+              const cache = getImagesCache();
+              const record = {
+                url: blobUrl, // We display this local blob, not the weibo url
+                originalUrl: url,
+                downloadedAt: Date.now()
+              };
+
+              // Save to Memory Cache (RAM) only
+              cache[key] = record;
+              
+              resolve(record);
+            } catch (e) {
+              console.error("Blob creation failed", e);
+              reject(e);
+            }
+          } else {
+            reject(new Error("HTTP " + response.status));
+          }
+          finalize();
+        },
+        onerror: (e) => {
+          console.error("Network error", e);
+          finalize();
+          reject(e);
         },
         ontimeout: () => {
-          console.error("[WeiboTimeline] Image download ontimeout:", key);
-          handleFailure(new Error("Timeout downloading image"));
+          finalize();
+          reject(new Error("Timeout"));
         }
       });
-      console.log("[WeiboTimeline] GM_xmlhttpRequest initiated, handle:", !!requestHandle);
     } catch (error) {
-      console.error("[WeiboTimeline] Failed to initiate image download:", key, error);
-      handleFailure(new Error("Failed to initiate image download: " + error.message));
+      finalize();
+      reject(error);
     }
   }
 
