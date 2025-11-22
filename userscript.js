@@ -153,6 +153,10 @@
   // Image download controls
   const IMAGE_DOWNLOAD_CONCURRENCY = 3;
   const IMAGE_DOWNLOAD_FAILSAFE_MS = 30000;
+  const IMAGE_PLACEHOLDER_DATA_URL =
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23f0f0f0'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.3em' fill='%23999' font-size='12'%3ELoading...%3C/text%3E%3C/svg%3E";
+  const IMAGE_ERROR_DATA_URL =
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23ffebee'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.3em' fill='%23c62828' font-size='12'%3EFailed%3C/text%3E%3C/svg%3E";
 
   // Runtime state
   let manualRefreshInProgress = false;
@@ -1433,11 +1437,12 @@
             img.alt = image.alt;
             img.loading = "lazy";
 
-            // Try to use downloaded image first, fallback to thumbnail
+            // Try to use downloaded image first, or download it
             if (downloadedImages[image.key]) {
               img.src = downloadedImages[image.key].url;
             } else {
-              img.src = image.thumbnail;
+              // Use a placeholder while loading to avoid OpaqueResponseBlocking
+              img.src = IMAGE_PLACEHOLDER_DATA_URL;
               // Download image in background
               downloadImage(image.url, image.key)
                 .then(record => {
@@ -1447,6 +1452,8 @@
                 })
                 .catch(err => {
                   console.warn("Failed to download image:", image.url, err);
+                  // Show error placeholder instead of trying to load from cross-origin
+                  img.src = IMAGE_ERROR_DATA_URL;
                 });
             }
 
