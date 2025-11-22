@@ -16,6 +16,29 @@ window.GM = {
                         finalUrl: opts.url
                     });
                 }
+            } else if (opts.responseType === 'blob') {
+                // Handle image/blob requests
+                console.log('[GM Mock] Blob request for:', opts.url);
+                
+                // Create a dummy blob (1x1 pixel PNG)
+                const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+                fetch('data:image/png;base64,' + base64)
+                    .then(response => response.blob())
+                    .then(blob => {
+                        if (opts.onload) {
+                            opts.onload({
+                                status: 200,
+                                response: blob,
+                                finalUrl: opts.url
+                            });
+                        }
+                    })
+                    .catch(err => {
+                        console.error('[GM Mock] Failed to create blob:', err);
+                        if (opts.onerror) {
+                            opts.onerror({ status: 500, error: err });
+                        }
+                    });
             } else {
                 // Generic mock response
                 if (opts.onload) {
