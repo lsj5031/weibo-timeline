@@ -939,45 +939,32 @@
       padding:1px 0;
       color:var(--color-muted-current);
     }
-    /* --- NEW LAYOUT CSS --- */
+    /* --- JAVASCRIPT MASONRY CSS --- */
     #list {
-      /* Remove Grid */
-      /* display: grid; */
-      /* grid-template-columns: ... */
-      
-      /* Add Columns (Pinterest Style) */
-      column-count: 4;
-      column-gap: var(--spacing-md);
+      position: relative; /* Container matches height of content */
+      width: 100%;
       margin-top: 0;
     }
-
+    
     .item {
+      position: absolute; /* We will position this with JS */
+      left: 0;
+      top: 0;
+      
       background: var(--color-secondary-current);
       border-radius: var(--border-radius-xl);
       padding: var(--spacing-md);
       border: 1px solid var(--color-border-current);
       box-shadow: 0 2px 8px var(--color-shadow-current);
-      transition: all 0.2s;
       
-      /* Crucial for Masonry: prevents item from splitting across columns */
-      break-inside: avoid; 
-      /* Ensures the box fills the column width */
-      width: 100%;
-      /* Displays as block to respect margins */
-      display: inline-block; 
-      margin-bottom: var(--spacing-md);
+      /* Smoothly animate layout changes */
+      transition: top 0.3s ease, left 0.3s ease, transform 0.2s, box-shadow 0.2s; 
+      
+      /* Ensure padding doesn't mess up width calcs */
+      box-sizing: border-box; 
     }
 
-    /* Responsive adjustments */
-    @media (max-width: 1400px) {
-      #list { column-count: 3; }
-    }
-    @media (max-width: 900px) {
-      #list { column-count: 2; }
-    }
-    @media (max-width: 600px) {
-      #list { column-count: 1; }
-    }
+    /* Remove the old media queries for columns, JS handles it now */
     .images{
       display:grid;
       grid-template-columns:repeat(2,1fr);
@@ -1395,6 +1382,66 @@
     });
 
     // ---------------------------------------------------------------
+    // MASONRY LAYOUT ENGINE
+    // ---------------------------------------------------------------
+    let layoutDebounceTimer = null;
+
+    function triggerLayout() {
+      if (layoutDebounceTimer) clearTimeout(layoutDebounceTimer);
+      layoutDebounceTimer = setTimeout(runMasonryLayout, 100);
+    }
+
+    function runMasonryLayout() {
+      if (!listEl) return;
+      const items = Array.from(listEl.children);
+      if (items.length === 0) return;
+
+      // 1. Calculate Columns
+      const containerWidth = listEl.clientWidth;
+      const gap = 16; // Matches var(--spacing-md)
+      const minColWidth = 280; // Minimum card width
+      
+      let colCount = Math.floor((containerWidth + gap) / (minColWidth + gap));
+      if (colCount < 1) colCount = 1;
+      
+      // Calculate exact column width
+      // (TotalWidth - TotalGaps) / Count
+      const colWidth = (containerWidth - ((colCount - 1) * gap)) / colCount;
+
+      // 2. Initialize Column Heights
+      const colHeights = new Array(colCount).fill(0);
+
+      // 3. Place Items
+      items.forEach(item => {
+        // Find the shortest column
+        let minHeight = colHeights[0];
+        let minColIndex = 0;
+        
+        for (let i = 1; i < colCount; i++) {
+          if (colHeights[i] < minHeight) {
+            minHeight = colHeights[i];
+            minColIndex = i;
+          }
+        }
+
+        // Apply Position
+        item.style.width = colWidth + "px";
+        item.style.left = (minColIndex * (colWidth + gap)) + "px";
+        item.style.top = minHeight + "px";
+
+        // Update column height
+        // Add item height + gap
+        colHeights[minColIndex] += item.offsetHeight + gap;
+      });
+
+      // 4. Set Container Height
+      listEl.style.height = Math.max(...colHeights) + "px";
+    }
+
+    // Attach resize listener to the popup window
+    tab.window.addEventListener('resize', triggerLayout);
+
+    // ---------------------------------------------------------------
     // RENDER TIMELINE
     // ---------------------------------------------------------------
 
@@ -1469,6 +1516,9 @@
             img.className = "post-image";
             img.alt = image.alt;
             img.loading = "lazy";
+            
+            // IMPORTANT: Trigger layout when image dimensions are known
+            img.onload = () => triggerLayout();
 
             // Try to use downloaded image first, or download it
             if (downloadedImages[image.key]) {
@@ -1485,6 +1535,9 @@
                   if (record && record.url) {
                     console.log("[WeiboTimeline] Setting image src:", image.key);
                     img.src = record.url;
+                    // Trigger layout again when the real image swaps in
+                    // (because real image height != placeholder height)
+                    triggerLayout(); 
                   }
                 })
                 .catch(err => {
@@ -1523,6 +1576,9 @@
 
         listEl.appendChild(item);
       });
+      
+      // Run initial layout after DOM insertion
+      triggerLayout();
     }
 
     // ---------------------------------------------------------------
