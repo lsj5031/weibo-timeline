@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.0)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.1)
 // @namespace    http://tampermonkey.net/
-// @version      4.0
-// @description  Enhanced Weibo timeline: manual refresh, editable UIDs, image support, improved masonry layout, new theme modes (Visionary/Creative/Momentum/Legacy), local archive with visual content.
+// @version      4.1
+// @description  Enhanced Weibo timeline: manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, new theme modes (Visionary/Creative/Momentum/Legacy), robust request handling with failsafe timeouts, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -150,6 +150,13 @@
   // How many items to render at most (UI only; archive can be larger)
   const MAX_RENDER_ITEMS = 400;
 
+  // Image download controls
+  const IMAGE_DOWNLOAD_CONCURRENCY = 3;
+  const IMAGE_DOWNLOAD_FAILSAFE_MS = 30000;
+
+  // Runtime state
+  let manualRefreshInProgress = false;
+
   // UID health tracking
   const HEALTH_VALID = 'valid';
   const HEALTH_INVALID = 'invalid';
@@ -253,43 +260,151 @@
     }
   }
 
-  function downloadImage(url, key) {
-    return new Promise((resolve, reject) => {
-      // Check if image already exists
-      const existingImages = loadImages();
-      if (existingImages[key]) {
-        resolve(existingImages[key]);
-        return;
-      }
+  const imageDownloadQueue = [];
+  const pendingImageDownloads = new Map();
+  let activeImageDownloads = 0;
+  let imageDownloadsPaused = false;
+  let imagesCache = null;
 
-      gmRequest({
+  function getImagesCache() {
+    if (!imagesCache) {
+      imagesCache = loadImages();
+    }
+    return imagesCache;
+  }
+
+  function persistImagesCache() {
+    if (imagesCache) {
+      saveImages(imagesCache);
+    }
+  }
+
+  function pauseImageDownloads() {
+    imageDownloadsPaused = true;
+  }
+
+  function resumeImageDownloads() {
+    if (!imageDownloadsPaused) return;
+    imageDownloadsPaused = false;
+    processImageDownloadQueue();
+  }
+
+  function processImageDownloadQueue() {
+    if (imageDownloadsPaused) return;
+    while (
+      activeImageDownloads < IMAGE_DOWNLOAD_CONCURRENCY &&
+      imageDownloadQueue.length > 0
+    ) {
+      const task = imageDownloadQueue.shift();
+      if (task) {
+        startImageDownload(task);
+      }
+    }
+  }
+
+  function startImageDownload(task) {
+    const { url, key, resolve, reject } = task;
+    activeImageDownloads++;
+
+    let completed = false;
+    let failsafeHandle = null;
+    let requestHandle = null;
+
+    const finalize = () => {
+      if (completed) return;
+      completed = true;
+      activeImageDownloads = Math.max(0, activeImageDownloads - 1);
+      processImageDownloadQueue();
+    };
+
+    const handleFailure = (error) => {
+      if (failsafeHandle) {
+        clearTimeout(failsafeHandle);
+      }
+      if (requestHandle && requestHandle.abort) {
+        try {
+          requestHandle.abort();
+        } catch (e) {
+          // ignore abort errors
+        }
+      }
+      finalize();
+      reject(error);
+    };
+
+    failsafeHandle = setTimeout(() => {
+      handleFailure(new Error("Image download timeout (failsafe)"));
+    }, IMAGE_DOWNLOAD_FAILSAFE_MS);
+
+    try {
+      requestHandle = gmRequest({
         method: "GET",
         url,
         responseType: "blob",
         timeout: 10000,
         onload: (response) => {
+          clearTimeout(failsafeHandle);
+          if (completed) return;
+
           try {
             const reader = new FileReader();
             reader.onload = () => {
-              const dataUrl = reader.result;
-              existingImages[key] = {
-                url: dataUrl,
-                originalUrl: url,
-                downloadedAt: Date.now()
-              };
-              saveImages(existingImages);
-              resolve(dataUrl);
+              try {
+                const dataUrl = reader.result;
+                const cache = getImagesCache();
+                const record = {
+                  url: dataUrl,
+                  originalUrl: url,
+                  downloadedAt: Date.now()
+                };
+                cache[key] = record;
+                persistImagesCache();
+                finalize();
+                resolve(record);
+              } catch (storeErr) {
+                finalize();
+                reject(new Error("Failed to store image: " + storeErr.message));
+              }
             };
-            reader.onerror = () => reject(new Error("Failed to read image data"));
+            reader.onerror = () => {
+              finalize();
+              reject(new Error("Failed to read image data"));
+            };
             reader.readAsDataURL(response.response);
           } catch (e) {
+            finalize();
             reject(new Error("Failed to process image: " + e.message));
           }
         },
-        onerror: () => reject(new Error("Network error downloading image")),
-        ontimeout: () => reject(new Error("Timeout downloading image"))
+        onerror: () => handleFailure(new Error("Network error downloading image")),
+        ontimeout: () => handleFailure(new Error("Timeout downloading image"))
       });
+    } catch (error) {
+      handleFailure(new Error("Failed to initiate image download: " + error.message));
+    }
+  }
+
+  function downloadImage(url, key) {
+    const cache = getImagesCache();
+    if (cache[key]) {
+      return Promise.resolve(cache[key]);
+    }
+
+    if (pendingImageDownloads.has(key)) {
+      return pendingImageDownloads.get(key);
+    }
+
+    const promise = new Promise((resolve, reject) => {
+      imageDownloadQueue.push({ url, key, resolve, reject });
+      processImageDownloadQueue();
     });
+
+    const trackedPromise = promise.finally(() => {
+      pendingImageDownloads.delete(key);
+    });
+
+    pendingImageDownloads.set(key, trackedPromise);
+    return trackedPromise;
   }
 
   function extractImages(mblog) {
@@ -381,70 +496,118 @@
     return new Promise((resolve, reject) => {
       log("REQUEST", { uid, logLabel, url });
 
-      gmRequest({
-        method: "GET",
-        url,
-        timeout: 15000,
-        onload: (response) => {
-          log("ONLOAD", {
-            uid,
-            logLabel,
-            status: response.status,
-            finalUrl: response.finalUrl || ""
-          });
+      let requestHandle = null;
+      let timeoutHandle = null;
+      let completed = false;
 
-          if (response.status < 200 || response.status >= 300) {
-            reject(new Error("HTTP " + response.status));
-            return;
+      // Failsafe timeout in case GM_xmlhttpRequest doesn't fire callbacks
+      timeoutHandle = setTimeout(() => {
+        if (!completed) {
+          completed = true;
+          log("FAILSAFE_TIMEOUT", { uid, logLabel });
+          if (requestHandle && requestHandle.abort) {
+            try {
+              requestHandle.abort();
+            } catch (e) {
+              log("ABORT_ERROR", { uid, error: e.message });
+            }
           }
-
-          let json;
-          try {
-            json = JSON.parse(response.responseText);
-          } catch (e) {
-            log("JSON_PARSE_ERROR", { uid, logLabel, message: e.message });
-            reject(new Error("JSON parse error"));
-            return;
-          }
-
-          log("JSON_META", {
-            uid,
-            logLabel,
-            ok: json.ok,
-            hasData: !!json.data,
-            cardsLen:
-              json.data && Array.isArray(json.data.cards)
-                ? json.data.cards.length
-                : null
-          });
-
-          resolve(json);
-        },
-        onerror: (response) => {
-          log("ONERROR", {
-            uid,
-            logLabel,
-            status: response && response.status,
-            readyState: response && response.readyState,
-            finalUrl: (response && response.finalUrl) || "",
-            error: response && response.error
-          });
-          reject(new Error("Network error"));
-        },
-        ontimeout: (response) => {
-          log("TIMEOUT", {
-            uid,
-            logLabel,
-            status: response && response.status,
-            finalUrl: (response && response.finalUrl) || ""
-          });
-          reject(new Error("Timeout"));
+          reject(new Error("Request timeout (failsafe)"));
         }
-      });
+      }, 30000); // 30 second failsafe
+
+      try {
+        requestHandle = gmRequest({
+          method: "GET",
+          url,
+          timeout: 15000,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://m.weibo.cn/",
+            "Accept": "application/json, text/plain, */*"
+          },
+          onload: (response) => {
+            if (completed) return;
+            completed = true;
+            clearTimeout(timeoutHandle);
+
+            log("ONLOAD", {
+              uid,
+              logLabel,
+              status: response.status,
+              finalUrl: response.finalUrl || ""
+            });
+
+            if (response.status < 200 || response.status >= 300) {
+              reject(new Error("HTTP " + response.status));
+              return;
+            }
+
+            let json;
+            try {
+              json = JSON.parse(response.responseText);
+            } catch (e) {
+              log("JSON_PARSE_ERROR", { uid, logLabel, message: e.message });
+              reject(new Error("JSON parse error"));
+              return;
+            }
+
+            log("JSON_META", {
+              uid,
+              logLabel,
+              ok: json.ok,
+              hasData: !!json.data,
+              cardsLen:
+                json.data && Array.isArray(json.data.cards)
+                  ? json.data.cards.length
+                  : null
+            });
+
+            resolve(json);
+          },
+          onerror: (response) => {
+            if (completed) return;
+            completed = true;
+            clearTimeout(timeoutHandle);
+
+            log("ONERROR", {
+              uid,
+              logLabel,
+              status: response && response.status,
+              readyState: response && response.readyState,
+              finalUrl: (response && response.finalUrl) || "",
+              error: response && response.error
+            });
+            reject(new Error("Network error"));
+          },
+          ontimeout: (response) => {
+            if (completed) return;
+            completed = true;
+            clearTimeout(timeoutHandle);
+
+            log("TIMEOUT", {
+              uid,
+              logLabel,
+              status: response && response.status,
+              finalUrl: (response && response.finalUrl) || ""
+            });
+            reject(new Error("Timeout"));
+          }
+        });
+
+        log("REQUEST_INITIATED", { uid, logLabel, hasHandle: !!requestHandle });
+      } catch (error) {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timeoutHandle);
+
+        log("REQUEST_ERROR", { uid, logLabel, error: error.message });
+        reject(new Error("Failed to initiate request: " + error.message));
+      }
     });
   }
 
-  function fetchUserPosts(uid, log) {
+  async function fetchUserPosts(uid, log, retryCount = 0) {
     const containerid = "107603" + uid;
     const params = {
       type: "uid",
@@ -452,7 +615,26 @@
       containerid: containerid,
       page: "1"
     };
-    return fetchWeiboApi(params, uid, "posts", log);
+
+    const maxRetries = 2;
+    const retryDelay = 3000;
+
+    try {
+      return await fetchWeiboApi(params, uid, "posts", log);
+    } catch (error) {
+      if (retryCount < maxRetries) {
+        log("RETRY_ATTEMPT", {
+          uid,
+          attempt: retryCount + 1,
+          maxRetries,
+          error: error.message,
+          retryDelay
+        });
+        await sleep(retryDelay);
+        return fetchUserPosts(uid, log, retryCount + 1);
+      }
+      throw error;
+    }
   }
 
   // -------------------------------------------------------------------
@@ -467,7 +649,7 @@
     }
 
     const doc = tab.document;
-    const currentUsers = loadUsers();
+    let currentUsers = loadUsers();
     const accountsSummary = currentUsers.length + " accounts";
 
     doc.open();
@@ -1202,6 +1384,7 @@
       });
       
       const limited = entries.slice(0, MAX_RENDER_ITEMS);
+      const downloadedImages = getImagesCache();
 
       listEl.innerHTML = "";
       limited.forEach(entry => {
@@ -1251,15 +1434,20 @@
             img.loading = "lazy";
 
             // Try to use downloaded image first, fallback to thumbnail
-            const downloadedImages = loadImages();
             if (downloadedImages[image.key]) {
               img.src = downloadedImages[image.key].url;
             } else {
               img.src = image.thumbnail;
               // Download image in background
-              downloadImage(image.url, image.key).catch(err => {
-                console.warn("Failed to download image:", image.url, err);
-              });
+              downloadImage(image.url, image.key)
+                .then(record => {
+                  if (record && record.url) {
+                    img.src = record.url;
+                  }
+                })
+                .catch(err => {
+                  console.warn("Failed to download image:", image.url, err);
+                });
             }
 
             img.onclick = () => {
@@ -1331,6 +1519,16 @@
     }
 
     tab.window.refreshAll = function refreshAll() {
+      if (manualRefreshInProgress) {
+        setStatus("Manual refresh already running...");
+        pageLog("MANUAL_REFRESH_SKIPPED", { reason: "already_running" });
+        return;
+      }
+
+      manualRefreshInProgress = true;
+      pauseImageDownloads();
+      pageLog("IMAGE_DOWNLOADS_PAUSED", { reason: "manual_refresh" });
+
       setStatus("Starting manual refresh...");
       pageLog("MANUAL_REFRESH_START", { accounts: currentUsers.length });
       
@@ -1342,40 +1540,46 @@
       }
       
       (async function runManualRefresh() {
-        for (let i = 0; i < currentUsers.length; i++) {
-          const uid = currentUsers[i];
-          setStatus("Fetching account " + (i + 1) + " / " + currentUsers.length + "…");
+        try {
+          for (let i = 0; i < currentUsers.length; i++) {
+            const uid = currentUsers[i];
+            setStatus("Fetching account " + (i + 1) + " / " + currentUsers.length + "…");
 
-          try {
-            await processOneUid(uid);
-          } catch (err) {
-            pageLog("PROCESS_FATAL", {
-              uid,
-              error: err && err.message ? err.message : String(err)
-            });
-          }
-
-          if (i < currentUsers.length - 1) {
-            pageLog("SleepBetweenAccounts", { uid, ms: BETWEEN_ACCOUNTS_MS });
             try {
-              await sleep(BETWEEN_ACCOUNTS_MS);
-              pageLog("AfterSleepBetweenAccounts", { uid });
-            } catch (e) {
-              pageLog("SleepError", {
+              await processOneUid(uid);
+            } catch (err) {
+              pageLog("PROCESS_FATAL", {
                 uid,
-                error: e && e.message ? e.message : String(e)
+                error: err && err.message ? err.message : String(err)
               });
             }
+
+            if (i < currentUsers.length - 1) {
+              pageLog("SleepBetweenAccounts", { uid, ms: BETWEEN_ACCOUNTS_MS });
+              try {
+                await sleep(BETWEEN_ACCOUNTS_MS);
+                pageLog("AfterSleepBetweenAccounts", { uid });
+              } catch (e) {
+                pageLog("SleepError", {
+                  uid,
+                  error: e && e.message ? e.message : String(e)
+                });
+              }
+            }
           }
-        }
-        
-        setStatus("Manual refresh complete");
-        pageLog("MANUAL_REFRESH_COMPLETE");
-        
-        // Re-enable refresh button
-        if (refreshBtn) {
-          refreshBtn.disabled = false;
-          refreshBtn.textContent = '🔄 Refresh All';
+          
+          setStatus("Manual refresh complete");
+          pageLog("MANUAL_REFRESH_COMPLETE");
+        } finally {
+          manualRefreshInProgress = false;
+          resumeImageDownloads();
+          pageLog("IMAGE_DOWNLOADS_RESUMED", { reason: "manual_refresh_complete" });
+
+          // Re-enable refresh button
+          if (refreshBtn) {
+            refreshBtn.disabled = false;
+            refreshBtn.textContent = '🔄 Refresh All';
+          }
         }
       })();
     }
