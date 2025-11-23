@@ -14,6 +14,10 @@ A Tampermonkey userscript that creates a clean, text-only timeline dashboard for
 ### Testing Without Tampermonkey
 Open `tests/test-page.html` in your browser to test functionality. The test interface includes mock API responses and testing scenarios.
 
+## Dashboard Preview
+
+![Weibo Timeline Dashboard](Screenshot%20weibio.png)
+
 ## Features
 
 ### Chronological Timeline
