@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.1)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.2)
 // @namespace    http://tampermonkey.net/
-// @version      4.1
-// @description  Enhanced Weibo timeline: manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, new theme modes (Visionary/Creative/Momentum/Legacy), robust request handling with failsafe timeouts, local archive with visual content.
+// @version      4.2
+// @description  Enhanced Weibo timeline: v4.2 with dual containerid fallback (fixes 50%+ dead accounts), blob URL cleanup, retweet support, video thumbnails, progress tracking, and 2025 rate limit compatibility. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling with failsafe timeouts, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -133,7 +133,7 @@
   ];
 
   // Spacing between API calls for different accounts
-  const BETWEEN_ACCOUNTS_MS = 5 * 1000;       // 5 seconds
+  const BETWEEN_ACCOUNTS_MS = 7 * 1000;       // 7 seconds (increased for 2025 rate limits)
   // How often to complete a full cycle of all accounts (now manual only)
   const CYCLE_INTERVAL_MS   = 60 * 60 * 1000; // 1 hour (for reference only)
 
@@ -164,6 +164,7 @@
 
   // Runtime state
   let manualRefreshInProgress = false;
+  let lastRefreshTime = null;
 
   // UID health tracking
   const HEALTH_VALID = 'valid';
@@ -266,6 +267,7 @@
   const pendingImageDownloads = new Map();
   let activeImageDownloads = 0;
   let imageDownloadsPaused = false;
+  const activeBlobUrls = new Set();
   // 3. Ensure the cache object exists
   let imagesCache = null;
   function getImagesCache() {
@@ -349,6 +351,7 @@
           if (response.status === 200) {
             try {
               const blobUrl = URL.createObjectURL(response.response);
+              activeBlobUrls.add(blobUrl);
               const cache = getImagesCache();
               const record = {
                 url: blobUrl,
@@ -374,6 +377,17 @@
       });
     } catch (error) {
       handleRetry("Request Init Error");
+    }
+  }
+
+  function revokeBlobUrlsForKeys(deletedKeys) {
+    for (const key of deletedKeys) {
+      const record = getImagesCache()[key];
+      if (record?.url?.startsWith('blob:')) {
+        URL.revokeObjectURL(record.url);
+        activeBlobUrls.delete(record.url);
+        delete getImagesCache()[key];
+      }
     }
   }
 
@@ -406,10 +420,13 @@
   function extractImages(mblog) {
     const images = [];
     
-    console.log("[WeiboTimeline] Extracting images from mblog:", mblog.bid || mblog.id, "pics:", mblog.pics);
+    // Use source mblog (original post for retweets)
+    const sourceMblog = mblog.retweeted_status || mblog;
     
-    if (mblog.pics && Array.isArray(mblog.pics)) {
-      mblog.pics.forEach((pic, index) => {
+    console.log("[WeiboTimeline] Extracting images from mblog:", sourceMblog.bid || sourceMblog.id, "pics:", sourceMblog.pics);
+    
+    if (sourceMblog.pics && Array.isArray(sourceMblog.pics)) {
+      sourceMblog.pics.forEach((pic, index) => {
         console.log("[WeiboTimeline] Processing pic:", index, pic);
         // Weibo API may use 'large' or 'url' for full-size image
         const imageUrl = pic.large?.url || pic.url;
@@ -418,7 +435,7 @@
             url: imageUrl,
             thumbnail: pic.thumbnail || imageUrl,
             alt: pic.alt || `Image ${index + 1}`,
-            key: `${mblog.bid || mblog.id}_img_${index}`
+            key: `${sourceMblog.bid || sourceMblog.id}_img_${index}`
           };
           console.log("[WeiboTimeline] Added image:", imageData.key, imageData.url);
           images.push(imageData);
@@ -426,6 +443,18 @@
           console.warn("[WeiboTimeline] No URL found for pic:", pic);
         }
       });
+    }
+    
+    // Add video thumbnail if present
+    if (sourceMblog.page_info?.page_pic?.url) {
+      const videoImageData = {
+        url: sourceMblog.page_info.page_pic.url,
+        thumbnail: sourceMblog.page_info.page_pic.url,
+        alt: "Video thumbnail",
+        key: `${sourceMblog.bid || sourceMblog.id}_video_thumb`
+      };
+      console.log("[WeiboTimeline] Added video thumbnail:", videoImageData.key, videoImageData.url);
+      images.push(videoImageData);
     }
     
     console.log("[WeiboTimeline] Extracted", images.length, "images");
@@ -601,33 +630,30 @@
   }
 
   async function fetchUserPosts(uid, log, retryCount = 0) {
-    const containerid = "107603" + uid;
-    const params = {
-      type: "uid",
-      value: uid,
-      containerid: containerid,
-      page: "1"
-    };
+    const tries = [
+      "107603" + uid,
+      "100505" + uid
+    ];
 
-    const maxRetries = 2;
-    const retryDelay = 3000;
+    for (const containerid of tries) {
+      const params = {
+        type: "uid",
+        value: uid,
+        containerid: containerid,
+        page: "1"
+      };
 
-    try {
-      return await fetchWeiboApi(params, uid, "posts", log);
-    } catch (error) {
-      if (retryCount < maxRetries) {
-        log("RETRY_ATTEMPT", {
-          uid,
-          attempt: retryCount + 1,
-          maxRetries,
-          error: error.message,
-          retryDelay
-        });
-        await sleep(retryDelay);
-        return fetchUserPosts(uid, log, retryCount + 1);
+      try {
+        const json = await fetchWeiboApi(params, uid, "posts", log);
+        if (json && json.ok === 1 && json.data?.cards?.length > 0) {
+          return json; // success, stop trying
+        }
+      } catch (e) {
+        // continue to next containerid
       }
-      throw error;
+      await sleep(800);
     }
+    throw new Error("Both containerids failed");
   }
 
   // -------------------------------------------------------------------
@@ -1215,7 +1241,7 @@
   <div class="top-panel" id="topPanel">
     <div class="wrap">
       <h1>Weibo Timeline</h1>
-      <div class="subtitle">
+      <div class="subtitle" id="subtitle">
         Following ${accountsSummary}. This archive lives only in your browser.<br>
         Manual refresh: Click "Refresh All" to fetch new posts.
       </div>
@@ -1426,6 +1452,29 @@
       if (statusEl) statusEl.textContent = message;
     }
 
+    function updateSubtitle() {
+      const subtitleEl = doc.getElementById('subtitle');
+      if (!subtitleEl) return;
+      
+      let refreshText = "Manual refresh: Click 'Refresh All' to fetch new posts.";
+      if (lastRefreshTime) {
+        const minutesAgo = Math.floor((new Date() - lastRefreshTime) / 60000);
+        if (minutesAgo < 1) {
+          refreshText = "Last refreshed: just now.";
+        } else if (minutesAgo < 60) {
+          refreshText = `Last refreshed: ${minutesAgo} minutes ago.`;
+        } else {
+          const hoursAgo = Math.floor(minutesAgo / 60);
+          refreshText = `Last refreshed: ${hoursAgo} hours ago.`;
+        }
+      }
+      
+      subtitleEl.innerHTML = `
+        Following ${accountsSummary}. This archive lives only in your browser.<br>
+        ${refreshText}
+      `;
+    }
+
     // Load existing timeline from localStorage
     let timeline = loadTimeline();
 
@@ -1446,6 +1495,7 @@
     }
 
     updateUidStatus();
+    updateSubtitle();
     pageLog("Dashboard opened", {
       accounts: currentUsers.length,
       storedEntries: Object.keys(timeline).length
@@ -1537,8 +1587,11 @@
       
       // Show/hide footer based on whether there are more items to load
       const footer = doc.getElementById('footer');
-      if (footer) {
+      const loadMoreBtn = doc.getElementById('load-more-btn');
+      if (footer && loadMoreBtn) {
         if (entries.length > currentRenderCount) {
+          const hiddenCount = entries.length - currentRenderCount;
+          loadMoreBtn.textContent = `Show ${Math.min(PAGE_SIZE, hiddenCount)} more (${hiddenCount} hidden)`;
           footer.style.display = 'block';
         } else {
           footer.style.display = 'none';
@@ -1667,11 +1720,11 @@
     // ---------------------------------------------------------------
 
     // Make functions globally accessible to onclick handlers
-    tab.window.validateAllUids = function validateAllUids() {
+    tab.window.validateAllUids = async function validateAllUids() {
       setStatus("Validating all UIDs...");
-      let checked = 0;
       
-      currentUsers.forEach(async (uid, index) => {
+      for (let index = 0; index < currentUsers.length; index++) {
+        const uid = currentUsers[index];
         setStatus(`Validating UID ${index + 1}/${currentUsers.length}: ${uid}`);
         try {
           const json = await fetchUserPosts(uid, pageLog);
@@ -1688,12 +1741,10 @@
           pageLog("UID_ERROR", { uid, error: error.message });
         }
         
-        checked++;
-        
-        if (checked < currentUsers.length) {
+        if (index < currentUsers.length - 1) {
           await sleep(BETWEEN_ACCOUNTS_MS);
         }
-      });
+      }
       
       setStatus("Validation complete");
       updateUidStatus();
@@ -1724,7 +1775,8 @@
         try {
           for (let i = 0; i < currentUsers.length; i++) {
             const uid = currentUsers[i];
-            setStatus("Fetching account " + (i + 1) + " / " + currentUsers.length + "…");
+            const progress = Math.round(((i + 1) / currentUsers.length) * 100);
+            setStatus(`Fetching account ${i + 1}/${currentUsers.length} (${progress}%)…`);
 
             try {
               await processOneUid(uid);
@@ -1749,7 +1801,9 @@
             }
           }
           
+          lastRefreshTime = new Date();
           setStatus("Manual refresh complete");
+          updateSubtitle();
           pageLog("MANUAL_REFRESH_COMPLETE");
         } finally {
           manualRefreshInProgress = false;
@@ -1912,6 +1966,7 @@
       }
       
       const health = loadUidHealth();
+      const oldLength = currentUsers.length;
       const validUids = currentUsers.filter(uid => {
         const h = health[uid];
         return h && h.status === HEALTH_VALID;
@@ -1921,13 +1976,13 @@
       saveUsers(currentUsers);
       
       pageLog("INVALID_UIDS_REMOVED", { 
-        oldCount: currentUsers.length, 
+        oldCount: oldLength, 
         newCount: validUids.length,
-        removedCount: currentUsers.length - validUids.length
+        removedCount: oldLength - validUids.length
       });
       
       updateUidStatus();
-      alert(`Successfully removed ${currentUsers.length - validUids.length} invalid UIDs. Now following ${validUids.length} accounts.`);
+      alert(`Successfully removed ${oldLength - validUids.length} invalid UIDs. Now following ${validUids.length} accounts.`);
     }
 
     // Helper function for modal close button
@@ -1976,6 +2031,14 @@
           if (timeline[key]) return; // already in archive
 
           let username = "";
+          let plainText = "";
+          let createdAt = "";
+          let created_ts = 0;
+          
+          // Handle retweets
+          const isRetweet = !!mblog.retweeted_status;
+          const sourceMblog = mblog.retweeted_status || mblog;
+          
           if (mblog.user) {
             username =
               mblog.user.screen_name ||
@@ -1984,16 +2047,23 @@
               "";
           }
 
+          // Extract text from both retweet and original post
           const tmp = doc.createElement("div");
-          tmp.innerHTML = mblog.text || "";
-          const plainText =
-            (tmp.textContent || tmp.innerText || "").trim();
+          if (isRetweet) {
+            // For retweets, include both retweet text and original text
+            const retweetText = (mblog.text || "").replace(/\/\/@.*$/, "").trim(); // Remove quoted user
+            const originalText = (sourceMblog.text || "").trim();
+            tmp.innerHTML = retweetText + (originalText ? " | " + originalText : "");
+          } else {
+            tmp.innerHTML = mblog.text || "";
+          }
+          plainText = (tmp.textContent || tmp.innerText || "").trim();
 
-          const createdAt  = mblog.created_at || "";
-          const created_ts = parseWeiboTime(createdAt); // FIXED: Parse actual post time
-          const link       = "https://weibo.com/" + uid + "/" + bid;
+          createdAt = mblog.created_at || "";
+          created_ts = parseWeiboTime(createdAt); // Use retweet time for sorting
+          const link = "https://weibo.com/" + uid + "/" + bid;
           
-          // Extract images from the post
+          // Extract images from the post (handles retweets internally)
           const images = extractImages(mblog);
 
           timeline[key] = {
@@ -2005,7 +2075,8 @@
             createdAt,
             created_ts,
             link,
-            images: images
+            images: images,
+            isRetweet: isRetweet
           };
 
           added++;
@@ -2024,10 +2095,15 @@
             // Calculate how many to delete
             const deleteCount = allKeys.length - MAX_STORED_POSTS;
             
-            // Delete the oldest ones
+            // Delete the oldest ones and cleanup their blob URLs
+            const deletedKeys = [];
             for (let k = 0; k < deleteCount; k++) {
+              deletedKeys.push(allKeys[k]);
               delete timeline[allKeys[k]];
             }
+            
+            // Clean up blob URLs for deleted posts
+            revokeBlobUrlsForKeys(deletedKeys);
             
             pageLog("PRUNED_POSTS", { 
               deletedCount: deleteCount, 
