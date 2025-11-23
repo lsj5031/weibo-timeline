@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.2)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.3)
 // @namespace    http://tampermonkey.net/
-// @version      4.2
-// @description  Enhanced Weibo timeline: v4.2 with dual containerid fallback (fixes 50%+ dead accounts), blob URL cleanup, retweet support, video thumbnails, progress tracking, and 2025 rate limit compatibility. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling with failsafe timeouts, local archive with visual content.
+// @version      4.3
+// @description  Enhanced Weibo timeline: v4.3 with ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -30,110 +30,11 @@
 
   // Accounts to follow (Weibo UIDs)
   const USERS = [
-    "1052404565",
-    "1080201461",
-    "1147851595",
-    "1222135407",
-    "1344386244",
-    "1393477857",
-    "1401902522",
-    "1444865141",
-    "1540883530",
-    "1610356014",
-    "1644225642",
-    "1645776681",
-    "1652595727",
-    "1663311732",
-    "1670659923",
-    "1672283232",
-    "1695350712",
-    "1698243607",
-    "1701816363",
-    "1702208197",
-    "1707465002",
-    "1712462832",
-    "1714261292",
-    "1743951792",
-    "1746222377",
-    "1752928750",
-    "1764452651",
-    "1768354461",
-    "1769173661",
-    "1791808013",
-    "1805789162",
-    "1826017297",
-    "1873999810",
-    "1884548883",
-    "1891727991",
-    "1899123755",
-    "1917885853",
-    "1928552571",
-    "1965945984",
-    "1971929971",
-    "1980508763",
-    "1989660417",
-    "2018499075",
-    "2031030981",
-    "2032999983",
-    "2094390301",
-    "2123664205",
-    "2155926845",
-    "2173291530",
-    "2189745412",
-    "2203034695",
-    "2218472014",
-    "2269761153",
-    "2389742313",
-    "2436298991",
-    "2535898204",
-    "2580392892",
-    "2588011444",
-    "2615626492",
-    "2681847263",
-    "2775449205",
-    "2810904414",
-    "3010420480",
-    "3083216765",
-    "3103768347",
-    "3130653487",
-    "3177420971",
-    "3194061481",
-    "3199840270",
-    "3218434004",
-    "3317930660",
-    "3699880234",
-    "3978383590",
-    "5597705779",
-    "5628021879",
-    "5655200015",
-    "5690608944",
-    "5750138957",
-    "5835994414",
-    "5843992636",
-    "5991211490",
-    "6069805893",
-    "6147017411",
-    "6254321002",
-    "6431633590",
-    "6557248346",
-    "6723106704",
-    "6755891821",
-    "6831021550",
-    "6850068687",
-    "6851371740",
-    "7163959006",
-    "7378646514",
-    "7384845399",
-    "7393169813",
-    "7540852197",
-    "7745842993",
-    "7797020453",
-    "7825510109"
-    // ← add more UIDs here
+    // ← add UIDs here
   ];
 
   // Spacing between API calls for different accounts
-  const BETWEEN_ACCOUNTS_MS = 7 * 1000;       // 7 seconds (increased for 2025 rate limits)
+  const BETWEEN_ACCOUNTS_MS = 10 * 1000;      // 10 seconds (safer for 2025 Weibo anti-scraping)
   // How often to complete a full cycle of all accounts (now manual only)
   const CYCLE_INTERVAL_MS   = 60 * 60 * 1000; // 1 hour (for reference only)
 
@@ -593,27 +494,30 @@
         }
       };
 
-      // 1. Failsafe timer (Script side)
+      // 1. Hard timeout (Script side) - increased to 25s to catch ghost responses
       timeoutHandle = setTimeout(() => {
-        finalize("FAILSAFE", null);
-      }, 20000); 
+        if (!completed) {
+          log("HARD_TIMEOUT_ABORT", { uid, reason: "no response after 25s" });
+          finalize("FAILSAFE", null);
+        }
+      }, 25000);
 
       try {
         gmRequest({
           method: "GET",
           url: url,
-          // 2. GM Timeout (Network side)
-          timeout: 15000, 
+          // 2. GM Timeout (Network side) - increased to 20s
+          timeout: 20000, 
           // 3. Crucial Headers for Weibo
           headers: {
-            "X-Requested-With": "XMLHttpRequest",
-            "X-XSRF-TOKEN": "", // Sometimes helps bypass checks
-            "Accept": "application/json, text/plain, */*",
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1",
-            "Referer": "https://m.weibo.cn/u/" + uid,
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin"
+           "X-Requested-With": "XMLHttpRequest",
+           "Accept": "application/json, text/plain, */*",
+           "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+           "Referer": "https://m.weibo.cn/",
+           "Origin": "https://m.weibo.cn",
+           "Sec-Fetch-Dest": "empty",
+           "Sec-Fetch-Mode": "cors",
+           "Sec-Fetch-Site": "same-origin"
           },
           // 4. Ensure cookies are sent
           anonymous: false, 
@@ -669,6 +573,39 @@
 
     const doc = tab.document;
     let currentUsers = loadUsers();
+    
+    // Prompt to add UIDs if empty
+    if (!currentUsers || currentUsers.length === 0) {
+      const input = prompt(
+        "No UIDs configured yet.\n\n" +
+        "Enter Weibo UIDs (one per line):\n\n" +
+        "Example:\n" +
+        "1052404565\n" +
+        "1080201461\n" +
+        "1147851595"
+      );
+      
+      if (input && input.trim()) {
+        currentUsers = input
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line.length > 0 && /^\d{6,11}$/.test(line));
+        
+        if (currentUsers.length > 0) {
+          saveUsers(currentUsers);
+          alert(`Added ${currentUsers.length} UIDs. Dashboard is now ready.`);
+        } else {
+          alert("No valid UIDs found. Please enter 6-11 digit numbers.");
+          tab.close();
+          return;
+        }
+      } else {
+        alert("No UIDs entered. Please try again and enter at least one UID.");
+        tab.close();
+        return;
+      }
+    }
+    
     const accountsSummary = currentUsers.length + " accounts";
 
     doc.open();
@@ -940,21 +877,81 @@
     #log{
       font-family:var(--font-family-mono);
       font-size:var(--font-size-xs);
-      white-space:pre-wrap;
       background:var(--color-secondary-current);
       border-radius:10px;
-      padding:6px 8px;
+      padding:8px;
       margin-bottom:var(--spacing-md);
-      max-height:140px;
-      overflow:auto;
+      max-height:200px;
+      overflow-y:auto;
+      overflow-x:hidden;
       border:1px solid var(--color-border-current);
       font-weight:400;
       letter-spacing: 0.01em;
       color:var(--color-primary-current);
     }
     #log .line{
-      padding:1px 0;
+      padding:4px 6px;
+      margin:1px 0;
+      border-left:3px solid transparent;
+      border-radius:2px;
       color:var(--color-muted-current);
+      display:flex;
+      align-items:flex-start;
+      gap:6px;
+      word-break:break-word;
+      white-space:normal;
+    }
+    #log .line.success{
+      border-left-color:#10b981;
+      background:rgba(16,185,129,0.08);
+      color:#059669;
+    }
+    #log .line.error{
+      border-left-color:#ef4444;
+      background:rgba(239,68,68,0.08);
+      color:#dc2626;
+    }
+    #log .line.warning{
+      border-left-color:#f59e0b;
+      background:rgba(245,158,11,0.08);
+      color:#d97706;
+    }
+    #log .line.info{
+      border-left-color:#3b82f6;
+      background:rgba(59,130,246,0.08);
+      color:#1d4ed8;
+    }
+    #log .line.debug{
+      border-left-color:#8b5cf6;
+      background:rgba(139,92,246,0.08);
+      color:#6d28d9;
+    }
+    #log .line-icon{
+      flex-shrink:0;
+      width:14px;
+      height:14px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-weight:bold;
+      font-size:10px;
+    }
+    #log .line-content{
+      flex:1;
+      min-width:0;
+    }
+    #log .line-time{
+      color:var(--color-muted-current);
+      font-size:10px;
+      opacity:0.6;
+    }
+    #log .line-label{
+      font-weight:600;
+      margin-right:4px;
+    }
+    #log .line-data{
+      opacity:0.8;
+      font-size:11px;
     }
     /* --- JAVASCRIPT MASONRY CSS --- */
     #list {
@@ -1264,6 +1261,25 @@
         <button onclick="window.clearInvalidUids()">Clear Invalid UIDs</button>
       </div>
       <div id="status"></div>
+      <div style="display: flex; gap: var(--spacing-sm); margin-bottom: var(--spacing-sm); font-size: var(--font-size-xs);">
+        <label style="display: flex; align-items: center; gap: 4px; color: var(--color-muted-current);">
+          <input type="checkbox" id="log-filter-errors" checked onchange="window.updateLogFilter()" style="cursor: pointer;">
+          Errors
+        </label>
+        <label style="display: flex; align-items: center; gap: 4px; color: var(--color-muted-current);">
+          <input type="checkbox" id="log-filter-warnings" checked onchange="window.updateLogFilter()" style="cursor: pointer;">
+          Warnings
+        </label>
+        <label style="display: flex; align-items: center; gap: 4px; color: var(--color-muted-current);">
+          <input type="checkbox" id="log-filter-info" checked onchange="window.updateLogFilter()" style="cursor: pointer;">
+          Info
+        </label>
+        <label style="display: flex; align-items: center; gap: 4px; color: var(--color-muted-current);">
+          <input type="checkbox" id="log-filter-debug" onchange="window.updateLogFilter()" style="cursor: pointer;">
+          Debug
+        </label>
+        <button onclick="window.clearLogs()" style="margin-left: auto; padding: 2px 8px; font-size: var(--font-size-xs); background: var(--color-secondary-current); border: 1px solid var(--color-border-current); border-radius: var(--border-radius-sm); cursor: pointer;">Clear</button>
+      </div>
       <div id="log"></div>
     </div>
   </div>
@@ -1413,12 +1429,55 @@
       const now = new Date();
       const time = now.toISOString().slice(11, 19); // HH:MM:SS
 
+      // Determine log type and icon based on label
+      const logTypeMap = {
+        'SUCCESS': { type: 'success', icon: '✓' },
+        'ERROR': { type: 'error', icon: '✕' },
+        'FAILED': { type: 'error', icon: '✕' },
+        'PROCESS_FATAL': { type: 'error', icon: '✕' },
+        'NETWORK_ERROR': { type: 'error', icon: '✕' },
+        'JSON_PARSE_ERROR': { type: 'error', icon: '✕' },
+        'TIMEOUT_ERROR': { type: 'error', icon: '⧖' },
+        'API_LOGIC_WARN': { type: 'warning', icon: '⚠' },
+        'WARNING': { type: 'warning', icon: '⚠' },
+        'UID_INVALID': { type: 'warning', icon: '⚠' },
+        'UID_ERROR': { type: 'warning', icon: '⚠' },
+        'PROCESS_FAILED': { type: 'warning', icon: '⚠' },
+        'REQUEST': { type: 'info', icon: 'i' },
+        'ONLOAD': { type: 'success', icon: '✓' },
+        'PROCESS_START': { type: 'info', icon: '→' },
+        'PROCESS_DONE': { type: 'success', icon: '✓' },
+        'MANUAL_REFRESH_START': { type: 'info', icon: '⟳' },
+        'MANUAL_REFRESH_COMPLETE': { type: 'success', icon: '✓' },
+        'PRUNED_POSTS': { type: 'info', icon: '≈' },
+        'UID_VALID': { type: 'success', icon: '✓' },
+        'API_NOT_OK': { type: 'warning', icon: '⚠' },
+        'IMAGE_DOWNLOADS_PAUSED': { type: 'info', icon: '⏸' },
+        'IMAGE_DOWNLOADS_RESUMED': { type: 'info', icon: '⏵' },
+        'IMAGE_DOWNLOADS': { type: 'debug', icon: '⧑' },
+        'Dashboard opened': { type: 'success', icon: '✓' }
+      };
+
+      // Check if label contains any known log type
+      let logType = 'debug';
+      let icon = '•';
+      for (const [key, config] of Object.entries(logTypeMap)) {
+        if (label.includes(key)) {
+          logType = config.type;
+          icon = config.icon;
+          break;
+        }
+      }
+
       let payload = "";
+      let dataStr = "";
       if (data !== undefined) {
         try {
-          payload = " " + JSON.stringify(data);
+          dataStr = JSON.stringify(data);
+          payload = " " + dataStr;
         } catch {
-          payload = " " + String(data);
+          dataStr = String(data);
+          payload = " " + dataStr;
         }
       }
 
@@ -1426,10 +1485,54 @@
 
       if (logEl) {
         const line = doc.createElement("div");
-        line.className = "line";
-        line.textContent = full;
+        line.className = "line " + logType;
+        
+        // Create icon element
+        const iconEl = doc.createElement("span");
+        iconEl.className = "line-icon";
+        iconEl.textContent = icon;
+        
+        // Create content element
+        const contentEl = doc.createElement("div");
+        contentEl.className = "line-content";
+        
+        // Time
+        const timeEl = doc.createElement("span");
+        timeEl.className = "line-time";
+        timeEl.textContent = time;
+        
+        // Label
+        const labelEl = doc.createElement("span");
+        labelEl.className = "line-label";
+        labelEl.textContent = label;
+        
+        // Data (if present)
+        let dataEl = null;
+        if (dataStr) {
+          dataEl = doc.createElement("span");
+          dataEl.className = "line-data";
+          dataEl.textContent = dataStr;
+        }
+        
+        contentEl.appendChild(timeEl);
+        contentEl.appendChild(doc.createTextNode(" "));
+        contentEl.appendChild(labelEl);
+        if (dataEl) {
+          contentEl.appendChild(dataEl);
+        }
+        
+        line.appendChild(iconEl);
+        line.appendChild(contentEl);
         logEl.appendChild(line);
         logEl.scrollTop = logEl.scrollHeight;
+        
+        // Keep only last 100 logs to avoid performance issues
+        const allLines = logEl.querySelectorAll('.line');
+        if (allLines.length > 100) {
+          for (let i = 0; i < allLines.length - 100; i++) {
+            allLines[i].remove();
+          }
+        }
       }
 
       // Log to both the original console and the dashboard tab console
@@ -1447,6 +1550,32 @@
         }
       }
     }
+
+    // Log filtering functions
+    tab.window.updateLogFilter = function() {
+      if (!logEl) return;
+      const showErrors = doc.getElementById('log-filter-errors')?.checked ?? true;
+      const showWarnings = doc.getElementById('log-filter-warnings')?.checked ?? true;
+      const showInfo = doc.getElementById('log-filter-info')?.checked ?? true;
+      const showDebug = doc.getElementById('log-filter-debug')?.checked ?? false;
+      
+      const lines = logEl.querySelectorAll('.line');
+      lines.forEach(line => {
+        let shouldShow = true;
+        if (line.classList.contains('error') && !showErrors) shouldShow = false;
+        if (line.classList.contains('warning') && !showWarnings) shouldShow = false;
+        if (line.classList.contains('info') && !showInfo) shouldShow = false;
+        if (line.classList.contains('debug') && !showDebug) shouldShow = false;
+        line.style.display = shouldShow ? '' : 'none';
+      });
+    };
+
+    tab.window.clearLogs = function() {
+      if (logEl) {
+        logEl.innerHTML = '';
+        pageLog("LOGS_CLEARED", { timestamp: new Date().toISOString() });
+      }
+    };
 
     function setStatus(message) {
       if (statusEl) statusEl.textContent = message;
@@ -1788,9 +1917,12 @@
             }
 
             if (i < currentUsers.length - 1) {
-              pageLog("SleepBetweenAccounts", { uid, ms: BETWEEN_ACCOUNTS_MS });
+              // Add random jitter (0-2s) to avoid pattern detection
+              const jitter = Math.random() * 2000;
+              const totalWait = BETWEEN_ACCOUNTS_MS + jitter;
+              pageLog("SleepBetweenAccounts", { uid, ms: Math.round(totalWait), jitter: Math.round(jitter) });
               try {
-                await sleep(BETWEEN_ACCOUNTS_MS);
+                await sleep(Math.round(totalWait));
                 pageLog("AfterSleepBetweenAccounts", { uid });
               } catch (e) {
                 pageLog("SleepError", {
@@ -2010,7 +2142,25 @@
       pageLog("PROCESS_START", { uid });
 
       try {
-        const json = await fetchUserPosts(uid, pageLog);
+        // Retry wrapper for ghost response hangs
+        let json;
+        let retryCount = 0;
+        const MAX_RETRIES = 2;
+        
+        while (retryCount <= MAX_RETRIES) {
+          try {
+            json = await fetchUserPosts(uid, pageLog, retryCount);
+            break; // Success
+          } catch (err) {
+            if ((err.message.includes("timeout") || err.message.includes("Ghost")) && retryCount < MAX_RETRIES) {
+              pageLog("RETRY_ON_HANG", { uid, attempt: retryCount + 1, reason: err.message });
+              await sleep(5000);  // 5s extra wait before retry
+              retryCount++;
+              continue;
+            }
+            throw err; // Re-throw if not a timeout or max retries exceeded
+          }
+        }
 
         if (!json || json.ok !== 1 || !json.data || !Array.isArray(json.data.cards)) {
           pageLog("API_NOT_OK", { uid, ok: json && json.ok });
