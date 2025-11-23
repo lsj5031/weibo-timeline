@@ -1,96 +1,105 @@
 # Weibo Timeline Userscript
 
-A Tampermonkey userscript that creates a clean, text-only timeline dashboard for monitoring multiple Weibo accounts. Features chronological sorting, UID health management, and comprehensive testing capabilities.
+A Tampermonkey userscript that creates a clean, text-only timeline dashboard for monitoring multiple Weibo accounts. Features manual refresh, UID health management, chronological sorting, and comprehensive error handling.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser
 2. Copy `userscript.js` to Tampermonkey
-3. Configure your UIDs in the `USERS` array
+3. Configure your UIDs in the `USERS` array (empty by default)
 4. Save and enable the script
+5. Click the Tampermonkey icon and select "Weibo Timeline Dashboard" to open the dashboard
 
 ### Testing Without Tampermonkey
-Open `test-page.html` in your browser to test functionality without installing Tampermonkey. The test interface includes:
-- Mock API responses and testing scenarios
-- UID validation and health tracking
-- Timeline sorting verification
-- Real-time console output
+Open `tests/test-page.html` in your browser to test functionality. The test interface includes mock API responses and testing scenarios.
 
-## ✨ Features
+## Features
 
-### 📅 Chronological Timeline
+### Chronological Timeline
 - Posts sorted by actual creation time (not when discovered)
 - Human-readable timestamps ("2h ago", "1d ago")
-- Persistent archive with proper time ordering
+- Persistent local archive up to 3000 posts
+- Image thumbnails with lazy loading
+- Retweet detection and proper text extraction
+- Video thumbnail support
 
-### 👥 UID Management
-- Health tracking for each monitored account
-- Automatic validation and problem detection
-- Export/import functionality for backup
-- Visual status indicators (valid/invalid/stalled)
+### Manual Refresh
+- Click "Refresh All" button to manually fetch posts from all monitored accounts
+- Automatic retry on network timeouts (up to 2 retries)
+- Real-time progress tracking during refresh
+- Graceful error handling per account
 
-### 🎨 Agent Mode Themes
-Four color schemes for different workflows:
-- **SMART** (Green): Balanced, focused browsing
-- **FREE** (Blue): Creative, exploratory mode
-- **RUSH** (Gold): Fast-paced, urgent tasks
-- **PLAN** (Purple): Strategic, planning mode
+### UID Management
+- Health tracking for each monitored account (valid/invalid/stalled/unknown)
+- Automatic validation with "Validate All UIDs" button
+- Edit UIDs directly in-dashboard modal
+- Export health data for backup and analysis
+- Remove problematic UIDs automatically or manually
 
-### 🖼️ Enhanced Media Experience
-- Built-in image lightbox (no new tabs)
-- Smart image grids based on count
-- Hover-revealed actions for cleaner UI
+### Image Handling
+- Smart image download queue with concurrency control (3 concurrent downloads)
+- Automatic retry with exponential backoff (up to 3 attempts per image)
+- Blob URL caching with proper cleanup
+- Image placeholder and error states
+- Video thumbnail extraction
+
+### Robust Error Handling
+- Per-UID error tracking and health monitoring
+- 25-second hard timeout on requests
+- Network failure recovery with automatic retry logic
+- Ghost response detection (requests that hang indefinitely)
+- Graceful degradation when individual accounts fail
+- Comprehensive console logging for debugging
+
+### Theme Support
+- Dark mode support with CSS variable theming
 - Responsive design for all screen sizes
+- Clean, minimalist UI focused on content
 
-### 🛡️ Robust Error Handling
-- Granular error types and recovery
-- UID-specific error tracking
-- Comprehensive logging and debugging
-- Graceful degradation on failures
-
-## 📖 Usage
+## Usage
 
 ### Basic Setup
 1. Install the userscript in Tampermonkey
-2. Edit the `USERS` array with Weibo UIDs to monitor
-3. Access the dashboard via the Tampermonkey menu
+2. Click Tampermonkey menu → "Weibo Timeline Dashboard"
+3. Click "Edit UIDs" to add Weibo account IDs (6-11 digit numbers)
+4. Save and the dashboard will load
 
-### Dashboard Features
-- **Timeline View**: Chronological feed of all monitored posts
-- **UID Management**: Validate and manage monitored accounts
-- **Agent Mode**: Switch between color themes
-- **Export Tools**: Backup data and health information
+### Dashboard Controls
+- **Refresh All**: Manually fetch new posts from all accounts (shows progress)
+- **Edit UIDs**: Add/remove accounts to monitor
+- **Validate All UIDs**: Check which accounts are working
+- **Manage UIDs**: Identify and remove problematic accounts
+- **Export Health Data**: Download UID health status as JSON
+- **Load More**: Display additional posts from the archive
 
-### UID Management
-- Click "Validate All UIDs" to check account health
-- Use "Manage UIDs" to identify problematic accounts
-- Export health data for backup and analysis
-- Remove invalid UIDs directly from the `USERS` array
-
-## 🔧 Technical Details
+## Technical Details
 
 ### Architecture
-- **Modular Design**: Separate utilities, API layer, and UI components
-- **Local Storage**: Persistent data storage in browser
-- **Error Resilience**: Robust error handling and recovery
-- **Rate Limiting**: Respectful API polling intervals
+- Single-file userscript with modular internal structure
+- Local Storage for persistent data (timeline, UID health, user list)
+- Manual refresh mode (auto-refresh disabled for rate-limiting)
+- Respectful API polling: 10 seconds between accounts, random jitter (0-2s)
 
 ### Data Structures
 ```javascript
 // Timeline entry structure
 {
-  id: "unique_post_id",
-  user: "username",
+  key: "uid_bid",
+  uid: "user_id",
+  username: "user_screen_name",
+  bid: "post_id",
   text: "post_content",
   createdAt: "Wed Nov 20 10:30:00 +0800 2024",
-  images: ["url1", "url2"],
-  created_ts: 1701234567890
+  created_ts: 1701234567890,
+  link: "https://weibo.com/uid/bid",
+  images: [{url, thumbnail, alt, key}],
+  isRetweet: false
 }
 
 // UID health tracking
 {
-  "1234567890": {
+  "uid": {
     status: "valid",           // valid/invalid/stalled/unknown
     lastChecked: 1701234567890,
     lastSuccess: 1701234567890
@@ -98,44 +107,74 @@ Four color schemes for different workflows:
 }
 ```
 
-## 🧪 Testing
+### LocalStorage Keys
+- `weibo_timeline_v3` - Archive of posts
+- `weibo_uid_health_v1` - Health status of each UID
+- `weibo_last_uid_v3` - Last successfully processed UID
+- `weibo_users_v1` - List of UIDs being monitored
+- `weibo_agent_mode_v1` - Current agent/theme mode
 
-### Test Interface
-Open `tests/test-page.html` to access comprehensive testing tools:
+### API Configuration
+- Endpoint: `https://m.weibo.cn/api/container/getIndex`
+- Request timeout: 25 seconds (hard abort)
+- Retry logic: Up to 2 automatic retries on timeout
+- Rate limiting: 10s between accounts + 0-2s random jitter
+- Max posts stored: 3000 (auto-prunes oldest when exceeded)
+
+## Testing
+
+### Test Files
+- `tests/test-page.html` - Interactive test interface
+- `tests/test-runner.js` - Test utilities
+- `tests/validate-uids.js` - UID validation helpers
+- `mock-gm-apis.js` - Mock Tampermonkey APIs for testing
+
+### Running Tests
+Open `tests/test-page.html` in your browser to access testing tools including:
 - Mock API responses for different scenarios
-- UID validation and health tracking
+- UID validation testing
 - Timeline sorting verification
-- Error handling simulation
 
-### Test Scenarios
-- **API Responses**: Empty data, errors, rate limiting
-- **UID Validation**: Valid formats, invalid formats, edge cases
-- **Timeline Sorting**: Mixed timestamps, missing data, malformed dates
-- **Error Recovery**: Network failures, timeouts, parsing errors
+## Troubleshooting
 
-## 🐛 Troubleshooting
+### Posts Not Updating
+- Check that UIDs are valid 6-11 digit numbers
+- Click "Validate All UIDs" to verify accounts are accessible
+- Use "Export Health Data" to see detailed status
+- Manual refresh may be rate-limited by Weibo (wait and retry)
 
-### Common Issues
-- **Timeline Not Updating**: Validate UIDs and check health status
-- **Posts Out of Order**: Clear cache and re-validate all UIDs
-- **UID Errors**: Use management tools to identify problems
-- **Storage Issues**: Check browser localStorage permissions
+### Posts Out of Order
+- Clear localStorage cache: Open DevTools → Application → Storage → Clear All
+- Re-validate all UIDs
+- Click "Refresh All" to fetch fresh data
 
-### Debug Tools
-- Console logging in dashboard
-- Export UID health data for analysis
-- Mock API response testing
-- Browser developer tools integration
+### UID Errors
+- Use "Manage UIDs" to identify problematic accounts
+- Remove invalid UIDs using "Edit UIDs"
+- Check browser console (F12) for detailed error logs
 
-### Documentation
-- **Performance Guide**: See `docs/PERFORMANCE_GUIDE.md` for optimization details
-- **Agent Modes**: See `docs/AGENT_MODES.md` for theme documentation
-- **Visual Guide**: See `docs/BEFORE_AFTER_GUIDE.md` for performance comparisons
+### Storage Issues
+- Browser localStorage is limited to ~5-10MB
+- Script auto-prunes oldest posts when exceeding 3000 total
+- Export and backup important data before clearing storage
 
-## 📄 License
+## Development Notes
+
+### Debugging
+- Open dashboard → Open browser DevTools (F12)
+- All script activity logged to console with `[WeiboTimeline]` prefix
+- Log categories: REQUEST, TIMEOUT_ERROR, NETWORK_ERROR, API_LOGIC_WARN, etc.
+
+### Known Limitations
+- Weibo's mobile API is undocumented and may change
+- Rate limiting enforced per Weibo's anti-scraping measures
+- Images download on-demand (not persisted to localStorage due to size)
+- Retweets show both retweet and original post text combined
+
+## License
 
 This project is provided as-is for educational and personal use.
 
 ---
 
-**Key Features**: Chronological sorting • UID health management • Agent mode themes • Image lightbox • Comprehensive testing • Error resilience
+**Key Features**: Manual refresh • UID health management • Chronological sorting • Image support • Retweet handling • Comprehensive error recovery • Local archive (3000 posts max) • Responsive UI
