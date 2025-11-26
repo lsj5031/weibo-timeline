@@ -223,7 +223,14 @@
       });
     }
     
+    let completed = false;
+    let failsafeHandle = null;
+    
     const finalize = (success = true) => {
+      if (completed) return;
+      completed = true;
+      if (failsafeHandle) clearTimeout(failsafeHandle);
+      
       const duration = Date.now() - startTime;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
       if (logger && success) {
@@ -239,6 +246,10 @@
     };
 
     const handleRetry = async (errorMsg, statusCode) => {
+      if (completed) return;
+      completed = true;
+      if (failsafeHandle) clearTimeout(failsafeHandle);
+      
       const duration = Date.now() - startTime;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
       
@@ -270,6 +281,21 @@
         reject(new Error(errorMsg));
       }
     };
+
+    failsafeHandle = setTimeout(() => {
+      if (!completed) {
+        if (logger) {
+          logger("IMAGE_DOWNLOAD_FAILSAFE", { 
+            key, 
+            attempt,
+            reason: "no response after failsafe timeout",
+            duration: Date.now() - startTime,
+            timeoutMs: IMAGE_DOWNLOAD_FAILSAFE_MS
+          });
+        }
+        handleRetry("Failsafe timeout", null);
+      }
+    }, IMAGE_DOWNLOAD_FAILSAFE_MS);
 
     try {
       gmRequest({
@@ -1521,6 +1547,7 @@
         'IMAGE_DOWNLOAD_SUCCESS': { type: 'debug', icon: '✓' },
         'IMAGE_DOWNLOAD_RETRY': { type: 'warning', icon: '↻' },
         'IMAGE_DOWNLOAD_FAILED': { type: 'error', icon: '✕' },
+        'IMAGE_DOWNLOAD_FAILSAFE': { type: 'warning', icon: '⧖' },
         'IMAGE_CACHE_HIT': { type: 'debug', icon: '⚡' },
         'IMAGE_CACHE_APPLIED': { type: 'debug', icon: '⚡' },
         'IMAGE_PLACEHOLDER_SET': { type: 'debug', icon: '◻' },
