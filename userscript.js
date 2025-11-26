@@ -179,12 +179,10 @@
   }
 
   function pauseImageDownloads() {
-    console.log("[WeiboTimeline] Pausing image downloads");
     imageDownloadsPaused = true;
   }
 
   function resumeImageDownloads() {
-    console.log("[WeiboTimeline] Resuming image downloads, currently paused:", imageDownloadsPaused);
     if (!imageDownloadsPaused) return;
     imageDownloadsPaused = false;
     processImageDownloadQueue();
@@ -192,17 +190,14 @@
 
   function processImageDownloadQueue() {
     if (imageDownloadsPaused) {
-      console.log("[WeiboTimeline] Image downloads are paused, skipping queue processing");
       return;
     }
-    console.log("[WeiboTimeline] Processing image queue - active:", activeImageDownloads, "queued:", imageDownloadQueue.length);
     while (
       activeImageDownloads < IMAGE_DOWNLOAD_CONCURRENCY &&
       imageDownloadQueue.length > 0
     ) {
       const task = imageDownloadQueue.shift();
       if (task) {
-        console.log("[WeiboTimeline] Starting image download for:", task.key);
         startImageDownload(task);
       }
     }
@@ -212,27 +207,66 @@
   const wait = (ms) => new Promise(res => setTimeout(res, ms));
 
   function startImageDownload(task, attempt = 1) {
-    const { url, key, resolve, reject } = task;
+    const { url, key, resolve, reject, logger } = task;
     const MAX_ATTEMPTS = 3;
+    const startTime = Date.now();
 
     activeImageDownloads++;
     
-    const finalize = () => {
+    if (logger) {
+      logger("IMAGE_DOWNLOAD_START", { 
+        key, 
+        attempt, 
+        maxAttempts: MAX_ATTEMPTS,
+        active: activeImageDownloads,
+        queued: imageDownloadQueue.length
+      });
+    }
+    
+    const finalize = (success = true) => {
+      const duration = Date.now() - startTime;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
+      if (logger && success) {
+        logger("IMAGE_DOWNLOAD_SUCCESS", { 
+          key, 
+          attempt,
+          duration,
+          active: activeImageDownloads,
+          queued: imageDownloadQueue.length
+        });
+      }
       processImageDownloadQueue();
     };
 
-    const handleRetry = async (errorMsg) => {
-      activeImageDownloads = Math.max(0, activeImageDownloads - 1); // Free up slot while waiting
+    const handleRetry = async (errorMsg, statusCode) => {
+      const duration = Date.now() - startTime;
+      activeImageDownloads = Math.max(0, activeImageDownloads - 1);
       
       if (attempt < MAX_ATTEMPTS) {
-        console.warn(`[WeiboTimeline] Image failed (${errorMsg}), retrying ${attempt}/${MAX_ATTEMPTS}: ${key}`);
-        await wait(1500 * attempt); // Exponential backoff (1.5s, 3s...)
-        // Re-queue the download
+        if (logger) {
+          logger("IMAGE_DOWNLOAD_RETRY", { 
+            key, 
+            attempt, 
+            maxAttempts: MAX_ATTEMPTS,
+            error: errorMsg,
+            statusCode,
+            duration,
+            waitMs: 1500 * attempt
+          });
+        }
+        await wait(1500 * attempt);
         startImageDownload(task, attempt + 1);
       } else {
-        console.error(`[WeiboTimeline] Image gave up after ${MAX_ATTEMPTS} attempts: ${key}`);
-        processImageDownloadQueue(); // Ensure queue continues
+        if (logger) {
+          logger("IMAGE_DOWNLOAD_FAILED", { 
+            key, 
+            attempts: MAX_ATTEMPTS,
+            error: errorMsg,
+            statusCode,
+            duration
+          });
+        }
+        processImageDownloadQueue();
         reject(new Error(errorMsg));
       }
     };
@@ -242,7 +276,7 @@
         method: "GET",
         url: url,
         responseType: "blob",
-        timeout: 30000, // Increased timeout to 30s
+        timeout: 30000,
         headers: {
           "Referer": "https://weibo.com/",
           "Origin": "https://weibo.com",
@@ -260,24 +294,24 @@
                 downloadedAt: Date.now()
               };
               cache[key] = record;
-              finalize();
+              finalize(true);
               resolve(record);
             } catch (e) {
-              handleRetry("Blob creation error");
+              handleRetry("Blob creation error", response.status);
             }
           } else {
-            handleRetry(`HTTP ${response.status}`);
+            handleRetry(`HTTP ${response.status}`, response.status);
           }
         },
         onerror: (e) => {
-          handleRetry("Network error");
+          handleRetry("Network error", null);
         },
         ontimeout: () => {
-          handleRetry("Timeout");
+          handleRetry("Timeout", null);
         }
       });
     } catch (error) {
-      handleRetry("Request Init Error");
+      handleRetry("Request Init Error", null);
     }
   }
 
@@ -292,21 +326,33 @@
     }
   }
 
-  function downloadImage(url, key) {
+  function downloadImage(url, key, logger = null) {
     const cache = getImagesCache();
     if (cache[key]) {
-      console.log("[WeiboTimeline] Image already cached:", key);
+      if (logger) {
+        logger("IMAGE_CACHE_HIT", { key });
+      }
       return Promise.resolve(cache[key]);
     }
 
     if (pendingImageDownloads.has(key)) {
-      console.log("[WeiboTimeline] Image download already pending:", key);
+      if (logger) {
+        logger("IMAGE_DOWNLOAD_PENDING", { key });
+      }
       return pendingImageDownloads.get(key);
     }
 
-    console.log("[WeiboTimeline] Queueing image download:", key, url);
+    if (logger) {
+      logger("IMAGE_DOWNLOAD_QUEUED", { 
+        key, 
+        url,
+        queueLength: imageDownloadQueue.length + 1,
+        activeDownloads: activeImageDownloads
+      });
+    }
+    
     const promise = new Promise((resolve, reject) => {
-      imageDownloadQueue.push({ url, key, resolve, reject });
+      imageDownloadQueue.push({ url, key, resolve, reject, logger });
       processImageDownloadQueue();
     });
 
@@ -324,11 +370,8 @@
     // Use source mblog (original post for retweets)
     const sourceMblog = mblog.retweeted_status || mblog;
     
-    console.log("[WeiboTimeline] Extracting images from mblog:", sourceMblog.bid || sourceMblog.id, "pics:", sourceMblog.pics);
-    
     if (sourceMblog.pics && Array.isArray(sourceMblog.pics)) {
       sourceMblog.pics.forEach((pic, index) => {
-        console.log("[WeiboTimeline] Processing pic:", index, pic);
         // Weibo API may use 'large' or 'url' for full-size image
         const imageUrl = pic.large?.url || pic.url;
         if (imageUrl) {
@@ -338,10 +381,7 @@
             alt: pic.alt || `Image ${index + 1}`,
             key: `${sourceMblog.bid || sourceMblog.id}_img_${index}`
           };
-          console.log("[WeiboTimeline] Added image:", imageData.key, imageData.url);
           images.push(imageData);
-        } else {
-          console.warn("[WeiboTimeline] No URL found for pic:", pic);
         }
       });
     }
@@ -354,11 +394,9 @@
         alt: "Video thumbnail",
         key: `${sourceMblog.bid || sourceMblog.id}_video_thumb`
       };
-      console.log("[WeiboTimeline] Added video thumbnail:", videoImageData.key, videoImageData.url);
       images.push(videoImageData);
     }
     
-    console.log("[WeiboTimeline] Extracted", images.length, "images");
     return images;
   }
 
@@ -445,7 +483,8 @@
     const url = API_BASE + "?" + qs;
 
     return new Promise((resolve, reject) => {
-      log("REQUEST", { uid, logLabel, url });
+      const requestStartTime = Date.now();
+      log("REQUEST", { uid, logLabel, url, params: Object.fromEntries(Object.entries(params)) });
 
       let completed = false;
       let timeoutHandle = null;
@@ -454,42 +493,54 @@
         if (completed) return;
         completed = true;
         if (timeoutHandle) clearTimeout(timeoutHandle);
+        
+        const duration = Date.now() - requestStartTime;
 
         if (type === "TIMEOUT" || type === "FAILSAFE") {
-            log("TIMEOUT_ERROR", { uid, type });
+            log("TIMEOUT_ERROR", { uid, type, duration, timeoutMs: 25000 });
             reject(new Error("Request timed out"));
             return;
         }
 
         if (type === "ERROR") {
-            log("NETWORK_ERROR", { uid, error: response });
+            log("NETWORK_ERROR", { uid, error: String(response), duration });
             reject(new Error("Network Error"));
             return;
         }
 
         // Success handling
-        log("ONLOAD", {
+        log("RESPONSE_RECEIVED", {
           uid,
           logLabel,
           status: response.status,
-          finalUrl: response.finalUrl || ""
+          duration,
+          finalUrl: response.finalUrl || "",
+          responseLength: response.responseText?.length || 0
         });
 
         if (response.status !== 200) {
            // Weibo sometimes returns 418 or 403 if scraping too fast
+           log("HTTP_ERROR", { uid, status: response.status, duration });
            reject(new Error("HTTP " + response.status)); 
            return;
         }
 
         try {
           const json = JSON.parse(response.responseText);
+          const dataInfo = json.data ? {
+            hasData: true,
+            cardsCount: json.data.cards?.length || 0
+          } : { hasData: false };
+          
+          log("JSON_PARSED", { uid, ok: json.ok, ...dataInfo });
+          
           if (json.ok !== 1) {
               // Soft error from Weibo (e.g., "containerid not found")
-              log("API_LOGIC_WARN", { uid, msg: json.msg || "ok!=1" });
+              log("API_LOGIC_WARN", { uid, msg: json.msg || "ok!=1", ok: json.ok });
           }
           resolve(json);
         } catch (e) {
-          log("JSON_PARSE_ERROR", { uid, logLabel, textLen: response.responseText?.length });
+          log("JSON_PARSE_ERROR", { uid, logLabel, textLen: response.responseText?.length, error: e.message });
           reject(new Error("JSON parse error"));
         }
       };
@@ -497,7 +548,7 @@
       // 1. Hard timeout (Script side) - increased to 25s to catch ghost responses
       timeoutHandle = setTimeout(() => {
         if (!completed) {
-          log("HARD_TIMEOUT_ABORT", { uid, reason: "no response after 25s" });
+          log("HARD_TIMEOUT_ABORT", { uid, reason: "no response after 25s", duration: Date.now() - requestStartTime });
           finalize("FAILSAFE", null);
         }
       }, 25000);
@@ -539,7 +590,8 @@
       "100505" + uid
     ];
 
-    for (const containerid of tries) {
+    for (let index = 0; index < tries.length; index++) {
+      const containerid = tries[index];
       const params = {
         type: "uid",
         value: uid,
@@ -547,16 +599,21 @@
         page: "1"
       };
 
+      log("CONTAINER_ATTEMPT", { uid, containerid, attempt: index + 1, retryCount });
+
       try {
         const json = await fetchWeiboApi(params, uid, "posts", log);
         if (json && json.ok === 1 && json.data?.cards?.length > 0) {
+          log("CONTAINER_SUCCESS", { uid, containerid, cards: json.data.cards.length });
           return json; // success, stop trying
         }
+        log("CONTAINER_EMPTY", { uid, containerid });
       } catch (e) {
-        // continue to next containerid
+        log("CONTAINER_ERROR", { uid, containerid, error: e && e.message ? e.message : String(e) });
       }
       await sleep(800);
     }
+    log("CONTAINER_ALL_FAILED", { uid, attempts: tries.length, retryCount });
     throw new Error("Both containerids failed");
   }
 
@@ -1437,6 +1494,7 @@
         'PROCESS_FATAL': { type: 'error', icon: '✕' },
         'NETWORK_ERROR': { type: 'error', icon: '✕' },
         'JSON_PARSE_ERROR': { type: 'error', icon: '✕' },
+        'HTTP_ERROR': { type: 'error', icon: '✕' },
         'TIMEOUT_ERROR': { type: 'error', icon: '⧖' },
         'API_LOGIC_WARN': { type: 'warning', icon: '⚠' },
         'WARNING': { type: 'warning', icon: '⚠' },
@@ -1445,7 +1503,9 @@
         'PROCESS_FAILED': { type: 'warning', icon: '⚠' },
         'PROCESS_HARD_TIMEOUT': { type: 'error', icon: '⧖' },
         'REQUEST': { type: 'info', icon: 'i' },
-        'ONLOAD': { type: 'success', icon: '✓' },
+        'REQUEST_INITIATED': { type: 'debug', icon: '→' },
+        'RESPONSE_RECEIVED': { type: 'success', icon: '✓' },
+        'JSON_PARSED': { type: 'debug', icon: '⦿' },
         'PROCESS_START': { type: 'info', icon: '→' },
         'PROCESS_DONE': { type: 'success', icon: '✓' },
         'MANUAL_REFRESH_START': { type: 'info', icon: '⟳' },
@@ -1455,7 +1515,24 @@
         'API_NOT_OK': { type: 'warning', icon: '⚠' },
         'IMAGE_DOWNLOADS_PAUSED': { type: 'info', icon: '⏸' },
         'IMAGE_DOWNLOADS_RESUMED': { type: 'info', icon: '⏵' },
-        'IMAGE_DOWNLOADS': { type: 'debug', icon: '⧑' },
+        'IMAGE_DOWNLOAD_QUEUED': { type: 'debug', icon: '⊕' },
+        'IMAGE_DOWNLOAD_PENDING': { type: 'debug', icon: '⧗' },
+        'IMAGE_DOWNLOAD_START': { type: 'debug', icon: '⬇' },
+        'IMAGE_DOWNLOAD_SUCCESS': { type: 'debug', icon: '✓' },
+        'IMAGE_DOWNLOAD_RETRY': { type: 'warning', icon: '↻' },
+        'IMAGE_DOWNLOAD_FAILED': { type: 'error', icon: '✕' },
+        'IMAGE_CACHE_HIT': { type: 'debug', icon: '⚡' },
+        'IMAGE_CACHE_APPLIED': { type: 'debug', icon: '⚡' },
+        'IMAGE_PLACEHOLDER_SET': { type: 'debug', icon: '◻' },
+        'IMAGE_RENDER_APPLIED': { type: 'debug', icon: '✓' },
+        'IMAGE_RENDER_FAILED': { type: 'error', icon: '✕' },
+        'IMAGE_DOWNLOAD_EMPTY': { type: 'warning', icon: '∅' },
+        'CONTAINER_ATTEMPT': { type: 'debug', icon: '→' },
+        'CONTAINER_SUCCESS': { type: 'success', icon: '✓' },
+        'CONTAINER_EMPTY': { type: 'warning', icon: '∅' },
+        'CONTAINER_ERROR': { type: 'error', icon: '✕' },
+        'CONTAINER_ALL_FAILED': { type: 'error', icon: '✕' },
+        'RETRY_ON_HANG': { type: 'warning', icon: '↻' },
         'Dashboard opened': { type: 'success', icon: '✓' }
       };
 
@@ -1767,12 +1844,10 @@
 
         // Add images if they exist
         if (entry.images && entry.images.length > 0) {
-          console.log("[WeiboTimeline] Rendering images for entry:", entry.key, "count:", entry.images.length);
           const imagesDiv = doc.createElement("div");
           imagesDiv.className = "images count-" + entry.images.length;
 
-          entry.images.forEach((image, index) => {
-            console.log("[WeiboTimeline] Rendering image:", image.key, "url:", image.url);
+          entry.images.forEach((image) => {
             const imgContainer = doc.createElement("div");
             imgContainer.className = "image-container";
 
@@ -1786,26 +1861,28 @@
 
             // Try to use downloaded image first, or download it
             if (downloadedImages[image.key]) {
-              console.log("[WeiboTimeline] Using cached image:", image.key);
+              pageLog("IMAGE_CACHE_APPLIED", { key: image.key, entryKey: entry.key });
               img.src = downloadedImages[image.key].url;
             } else {
-              console.log("[WeiboTimeline] Image not cached, starting download:", image.key);
+              pageLog("IMAGE_PLACEHOLDER_SET", { key: image.key, entryKey: entry.key });
               // Use a placeholder while loading to avoid OpaqueResponseBlocking
               img.src = IMAGE_PLACEHOLDER_DATA_URL;
               // Download image in background
-              downloadImage(image.url, image.key)
+              downloadImage(image.url, image.key, pageLog)
                 .then(record => {
-                  console.log("[WeiboTimeline] Image download promise resolved:", image.key, !!record);
                   if (record && record.url) {
-                    console.log("[WeiboTimeline] Setting image src:", image.key);
+                    pageLog("IMAGE_RENDER_APPLIED", { key: image.key, entryKey: entry.key });
                     img.src = record.url;
                     // Trigger layout again when the real image swaps in
                     // (because real image height != placeholder height)
                     triggerLayout(); 
+                  } else {
+                    pageLog("IMAGE_DOWNLOAD_EMPTY", { key: image.key, entryKey: entry.key });
+                    img.src = IMAGE_ERROR_DATA_URL;
                   }
                 })
                 .catch(err => {
-                  console.error("[WeiboTimeline] Image download promise rejected:", image.key, err);
+                  pageLog("IMAGE_RENDER_FAILED", { key: image.key, entryKey: entry.key, error: err && err.message ? err.message : String(err) });
                   // Show error placeholder instead of trying to load from cross-origin
                   img.src = IMAGE_ERROR_DATA_URL;
                 });
