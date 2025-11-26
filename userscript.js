@@ -1510,7 +1510,12 @@
 
     function pageLog(label, data) {
       const now = new Date();
-      const time = now.toISOString().slice(11, 19); // HH:MM:SS
+      const time = now.toLocaleTimeString(undefined, {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      }); // HH:MM:SS in local timezone
 
       // Determine log type and icon based on label
       const logTypeMap = {
@@ -1535,6 +1540,7 @@
         'PROCESS_START': { type: 'info', icon: '→' },
         'PROCESS_DONE': { type: 'success', icon: '✓' },
         'MANUAL_REFRESH_START': { type: 'info', icon: '⟳' },
+        'MANUAL_REFRESH_RESUME': { type: 'info', icon: '↪' },
         'MANUAL_REFRESH_COMPLETE': { type: 'success', icon: '✓' },
         'PRUNED_POSTS': { type: 'info', icon: '≈' },
         'UID_VALID': { type: 'success', icon: '✓' },
@@ -2031,7 +2037,27 @@
       pageLog("IMAGE_DOWNLOADS_PAUSED", { reason: "manual_refresh" });
 
       setStatus("Starting manual refresh...");
-      pageLog("MANUAL_REFRESH_START", { accounts: currentUsers.length });
+      
+      // Check if we should resume from a previously interrupted refresh
+      const lastUid = loadLastUid();
+      let startIndex = 0;
+      
+      if (lastUid) {
+        const lastIndex = currentUsers.indexOf(lastUid);
+        if (lastIndex !== -1 && lastIndex < currentUsers.length - 1) {
+          startIndex = lastIndex + 1;
+          pageLog("MANUAL_REFRESH_RESUME", { 
+            lastUid, 
+            resumeFromIndex: startIndex, 
+            totalAccounts: currentUsers.length 
+          });
+          setStatus(`Resuming from UID ${lastUid} (${startIndex + 1}/${currentUsers.length})...`);
+        } else {
+          pageLog("MANUAL_REFRESH_START", { accounts: currentUsers.length });
+        }
+      } else {
+        pageLog("MANUAL_REFRESH_START", { accounts: currentUsers.length });
+      }
       
       // Disable refresh button during process
       const refreshBtn = doc.getElementById('refresh-all-btn');
@@ -2046,7 +2072,7 @@
         let timeoutCount = 0;
 
         try {
-          for (let i = 0; i < currentUsers.length; i++) {
+          for (let i = startIndex; i < currentUsers.length; i++) {
             const uid = currentUsers[i];
             const progress = Math.round(((i + 1) / currentUsers.length) * 100);
             setStatus(`Fetching account ${i + 1}/${currentUsers.length} (${progress}%)…`);
@@ -2090,6 +2116,10 @@
           }
           
           lastRefreshTime = new Date();
+          
+          // Clear last UID marker since we completed the full refresh
+          saveLastUid(null);
+          
           setStatus("Manual refresh complete");
           updateSubtitle();
           pageLog("MANUAL_REFRESH_COMPLETE", {
