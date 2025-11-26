@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.3)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.3.1)
 // @namespace    http://tampermonkey.net/
-// @version      4.3
-// @description  Enhanced Weibo timeline: v4.3 with ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
+// @version      4.3.1
+// @description  Enhanced Weibo timeline: v4.3.1 adds per-UID hard timeout failsafe so a single stalled account can’t lock up manual refresh. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -1443,6 +1443,7 @@
         'UID_INVALID': { type: 'warning', icon: '⚠' },
         'UID_ERROR': { type: 'warning', icon: '⚠' },
         'PROCESS_FAILED': { type: 'warning', icon: '⚠' },
+        'PROCESS_HARD_TIMEOUT': { type: 'error', icon: '⧖' },
         'REQUEST': { type: 'info', icon: 'i' },
         'ONLOAD': { type: 'success', icon: '✓' },
         'PROCESS_START': { type: 'info', icon: '→' },
@@ -1879,6 +1880,41 @@
       updateUidStatus();
     }
 
+    // Failsafe timeout wrapper for UID processing
+    async function processOneUidWithTimeout(uid, timeoutMs = 40000) {
+      return new Promise((resolve, reject) => {
+        let completed = false;
+        let timeoutHandle = null;
+
+        // Create hard timeout
+        timeoutHandle = setTimeout(() => {
+          if (!completed) {
+            completed = true;
+            const error = new Error(`Hard timeout after ${timeoutMs}ms`);
+            error.isHardTimeout = true;
+            reject(error);
+          }
+        }, timeoutMs);
+
+        // Run the actual processing
+        processOneUid(uid)
+          .then((result) => {
+            if (!completed) {
+              completed = true;
+              clearTimeout(timeoutHandle);
+              resolve(result);
+            }
+          })
+          .catch((err) => {
+            if (!completed) {
+              completed = true;
+              clearTimeout(timeoutHandle);
+              reject(err);
+            }
+          });
+      });
+    }
+
     tab.window.refreshAll = function refreshAll() {
       if (manualRefreshInProgress) {
         setStatus("Manual refresh already running...");
@@ -1901,6 +1937,10 @@
       }
       
       (async function runManualRefresh() {
+        let successCount = 0;
+        let failureCount = 0;
+        let timeoutCount = 0;
+
         try {
           for (let i = 0; i < currentUsers.length; i++) {
             const uid = currentUsers[i];
@@ -1908,12 +1948,24 @@
             setStatus(`Fetching account ${i + 1}/${currentUsers.length} (${progress}%)…`);
 
             try {
-              await processOneUid(uid);
+              await processOneUidWithTimeout(uid, 40000); // 40s hard timeout per UID
+              successCount++;
             } catch (err) {
-              pageLog("PROCESS_FATAL", {
-                uid,
-                error: err && err.message ? err.message : String(err)
-              });
+              if (err && err.isHardTimeout) {
+                timeoutCount++;
+                pageLog("PROCESS_HARD_TIMEOUT", {
+                  uid,
+                  message: "UID processing exceeded 40s timeout, continuing to next UID",
+                  error: err.message
+                });
+                updateUidHealth(uid, HEALTH_STALLED);
+              } else {
+                failureCount++;
+                pageLog("PROCESS_FATAL", {
+                  uid,
+                  error: err && err.message ? err.message : String(err)
+                });
+              }
             }
 
             if (i < currentUsers.length - 1) {
@@ -1936,7 +1988,12 @@
           lastRefreshTime = new Date();
           setStatus("Manual refresh complete");
           updateSubtitle();
-          pageLog("MANUAL_REFRESH_COMPLETE");
+          pageLog("MANUAL_REFRESH_COMPLETE", {
+            total: currentUsers.length,
+            success: successCount,
+            failed: failureCount,
+            timedOut: timeoutCount
+          });
         } finally {
           manualRefreshInProgress = false;
           resumeImageDownloads();
