@@ -225,11 +225,17 @@
     
     let completed = false;
     let failsafeHandle = null;
+    let requestHandle = null;
     
     const finalize = (success = true) => {
       if (completed) return;
       completed = true;
       if (failsafeHandle) clearTimeout(failsafeHandle);
+      if (requestHandle && requestHandle.abort) {
+        try {
+          requestHandle.abort();
+        } catch (e) {}
+      }
       
       const duration = Date.now() - startTime;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
@@ -249,6 +255,11 @@
       if (completed) return;
       completed = true;
       if (failsafeHandle) clearTimeout(failsafeHandle);
+      if (requestHandle && requestHandle.abort) {
+        try {
+          requestHandle.abort();
+        } catch (e) {}
+      }
       
       const duration = Date.now() - startTime;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
@@ -290,15 +301,37 @@
             attempt,
             reason: "no response after failsafe timeout",
             duration: Date.now() - startTime,
-            timeoutMs: IMAGE_DOWNLOAD_FAILSAFE_MS
+            timeoutMs: IMAGE_DOWNLOAD_FAILSAFE_MS,
+            hasRequestHandle: !!requestHandle,
+            canAbort: !!(requestHandle && requestHandle.abort)
           });
+        }
+        if (requestHandle && requestHandle.abort) {
+          try {
+            if (logger) {
+              logger("IMAGE_DOWNLOAD_ABORTING", { 
+                key, 
+                attempt,
+                reason: "failsafe triggered"
+              });
+            }
+            requestHandle.abort();
+          } catch (e) {
+            if (logger) {
+              logger("IMAGE_DOWNLOAD_ABORT_FAILED", { 
+                key, 
+                attempt,
+                error: e.message
+              });
+            }
+          }
         }
         handleRetry("Failsafe timeout", null);
       }
     }, IMAGE_DOWNLOAD_FAILSAFE_MS);
 
     try {
-      gmRequest({
+      requestHandle = gmRequest({
         method: "GET",
         url: url,
         responseType: "blob",
