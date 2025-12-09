@@ -167,10 +167,14 @@
   const imageDownloadQueue = [];
   const pendingImageDownloads = new Map();
   const pendingImageTimeouts = new Map();
+  const failedImageDownloads = new Set(); // Track permanently failed images to avoid retry loops
   let activeImageDownloads = 0;
   let imageDownloadsPaused = false;
+  let imageProcessingDeferred = false; // Flag to defer image processing
   const activeBlobUrls = new Set();
-  const PENDING_DOWNLOAD_TIMEOUT_MS = 60000; // 60 seconds timeout for stuck pending downloads
+  const PENDING_DOWNLOAD_TIMEOUT_MS = 45000; // 45 seconds timeout for stuck pending downloads
+  const FAILED_IMAGE_RETRY_COOLDOWN = 300000; // 5 minutes before retrying failed images
+  const IMAGE_CACHE_VALIDITY_MS = 3600000; // 1 hour cache validity
   // 3. Ensure the cache object exists
   let imagesCache = null;
   function getImagesCache() {
@@ -188,6 +192,149 @@
     if (!imageDownloadsPaused) return;
     imageDownloadsPaused = false;
     processImageDownloadQueue();
+  }
+
+  function deferImageProcessing(defer = true) {
+    imageProcessingDeferred = defer;
+    if (!defer && !imageDownloadsPaused) {
+      // Resume processing when deferral is lifted
+      setTimeout(() => processImageDownloadQueue(), 100);
+    }
+  }
+
+  // Periodic cleanup of stale pending downloads
+  function cleanupStaleDownloads() {
+    const now = Date.now();
+    const staleKeys = [];
+    
+    for (const [key, timeout] of pendingImageTimeouts.entries()) {
+      if (now - timeout > PENDING_DOWNLOAD_TIMEOUT_MS) {
+        staleKeys.push(key);
+      }
+    }
+    
+    if (staleKeys.length > 0) {
+      for (const key of staleKeys) {
+        pendingImageDownloads.delete(key);
+        pendingImageTimeouts.delete(key);
+        failedImageDownloads.add(key);
+        setTimeout(() => failedImageDownloads.delete(key), FAILED_IMAGE_RETRY_COOLDOWN);
+      }
+      
+      pageLog("CLEANUP_STALE_DOWNLOADS", {
+        cleanedCount: staleKeys.length,
+        staleKeys
+      });
+    }
+  }
+
+  // Run cleanup every 2 minutes
+  setInterval(cleanupStaleDownloads, 120000);
+
+  // Network connectivity diagnostics
+  function getNetworkDiagnostics() {
+    return {
+      online: navigator.onLine,
+      connection: navigator.connection ? {
+        effectiveType: navigator.connection.effectiveType,
+        downlink: navigator.connection.downlink,
+        rtt: navigator.connection.rtt,
+        saveData: navigator.connection.saveData
+      } : null,
+      userAgent: navigator.userAgent.substring(0, 100),
+      cookieEnabled: navigator.cookieEnabled,
+      doNotTrack: navigator.doNotTrack,
+      language: navigator.language,
+      platform: navigator.platform,
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  // Test network connectivity to Weibo domains
+  async function testWeiboConnectivity() {
+    const testUrls = [
+      'https://weibo.com/',
+      'https://m.weibo.cn/',
+      'https://sinaimg.cn/'
+    ];
+    
+    const results = [];
+    
+    for (const url of testUrls) {
+      try {
+        const startTime = Date.now();
+        const response = await fetch(url, { 
+          method: 'HEAD', 
+          mode: 'no-cors',
+          cache: 'no-cache'
+        });
+        const duration = Date.now() - startTime;
+        results.push({
+          url,
+          success: true,
+          duration,
+          error: null
+        });
+      } catch (error) {
+        results.push({
+          url,
+          success: false,
+          duration: null,
+          error: error.message
+        });
+      }
+    }
+    
+    return results;
+  }
+
+  // Track image failure patterns for diagnostics
+  const imageFailureStats = {
+    totalAttempts: 0,
+    totalFailures: 0,
+    recentFailures: [],
+    lastDiagnosticTime: 0
+  };
+
+  // Run network diagnostics when image failure rate is high
+  async function checkImageFailurePatterns() {
+    const now = Date.now();
+    const recentFailures = imageFailureStats.recentFailures.filter(f => now - f.timestamp < 300000); // Last 5 minutes
+    
+    if (recentFailures.length >= 5 && (now - imageFailureStats.lastDiagnosticTime) > 300000) {
+      // High failure rate detected, run diagnostics
+      imageFailureStats.lastDiagnosticTime = now;
+      
+      const networkInfo = getNetworkDiagnostics();
+      const connectivityResults = await testWeiboConnectivity();
+      
+      pageLog("IMAGE_FAILURE_PATTERN_DETECTED", {
+        recentFailures: recentFailures.length,
+        totalAttempts: imageFailureStats.totalAttempts,
+        totalFailures: imageFailureStats.totalFailures,
+        failureRate: ((recentFailures.length / Math.max(imageFailureStats.totalAttempts, 1)) * 100).toFixed(2) + '%',
+        networkInfo,
+        connectivityResults
+      });
+    }
+  }
+
+  function recordImageFailure(key, error, statusCode) {
+    imageFailureStats.totalAttempts++;
+    imageFailureStats.totalFailures++;
+    imageFailureStats.recentFailures.push({
+      key,
+      error,
+      statusCode,
+      timestamp: Date.now()
+    });
+    
+    // Keep only recent failures
+    if (imageFailureStats.recentFailures.length > 20) {
+      imageFailureStats.recentFailures = imageFailureStats.recentFailures.slice(-20);
+    }
+    
+    checkImageFailurePatterns();
   }
 
   function processImageDownloadQueue() {
@@ -253,7 +400,7 @@
       processImageDownloadQueue();
     };
 
-    const handleRetry = async (errorMsg, statusCode) => {
+    const handleRetry = async (errorMsg, statusCode, errorDetails = null) => {
       if (completed) return;
       completed = true;
       if (failsafeHandle) clearTimeout(failsafeHandle);
@@ -266,6 +413,18 @@
       const duration = Date.now() - startTime;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
       
+      // Enhanced network diagnostics
+      const networkInfo = getNetworkDiagnostics();
+      
+      // Record failure for pattern analysis
+      recordImageFailure(key, errorMsg, statusCode);
+      
+      // Mark as failed if max attempts reached
+      if (attempt >= MAX_ATTEMPTS) {
+        failedImageDownloads.add(key);
+        setTimeout(() => failedImageDownloads.delete(key), FAILED_IMAGE_RETRY_COOLDOWN);
+      }
+      
       if (attempt < MAX_ATTEMPTS) {
         if (logger) {
           logger("IMAGE_DOWNLOAD_RETRY", { 
@@ -275,7 +434,9 @@
             error: errorMsg,
             statusCode,
             duration,
-            waitMs: 1500 * attempt
+            waitMs: 1500 * attempt,
+            networkInfo,
+            errorDetails
           });
         }
         await wait(1500 * attempt);
@@ -287,7 +448,10 @@
             attempts: MAX_ATTEMPTS,
             error: errorMsg,
             statusCode,
-            duration
+            duration,
+            networkInfo,
+            errorDetails,
+            finalFailure: true
           });
         }
         processImageDownloadQueue();
@@ -346,29 +510,57 @@
         onload: (response) => {
           if (response.status === 200) {
             try {
+              // Validate response before creating blob
+              if (!response.response || response.response.size === 0) {
+                handleRetry("Empty response received", response.status, {
+                  responseType: typeof response.response,
+                  responseSize: response.response?.size || 0,
+                  responseText: response.responseText?.substring(0, 200)
+                });
+                return;
+              }
+              
               const blobUrl = URL.createObjectURL(response.response);
               activeBlobUrls.add(blobUrl);
               const cache = getImagesCache();
               const record = {
                 url: blobUrl,
                 originalUrl: url,
-                downloadedAt: Date.now()
+                downloadedAt: Date.now(),
+                size: response.response.size,
+                mimeType: response.response.type
               };
               cache[key] = record;
               finalize(true);
               resolve(record);
             } catch (e) {
-              handleRetry("Blob creation error", response.status);
+              handleRetry("Blob creation error", response.status, {
+                errorType: e.name,
+                errorMessage: e.message,
+                responseType: typeof response.response
+              });
             }
           } else {
-            handleRetry(`HTTP ${response.status}`, response.status);
+            handleRetry(`HTTP ${response.status}`, response.status, {
+              responseText: response.responseText?.substring(0, 200),
+              finalUrl: response.finalUrl,
+              headers: response.responseHeaders
+            });
           }
         },
         onerror: (e) => {
-          handleRetry("Network error", null);
+          handleRetry("Network error", null, {
+            errorType: e?.name || 'Unknown',
+            errorMessage: e?.message || 'No error details',
+            readyState: e?.readyState,
+            status: e?.status
+          });
         },
         ontimeout: () => {
-          handleRetry("Timeout", null);
+          handleRetry("Request timeout", null, {
+            timeoutMs: 30000,
+            actualDuration: Date.now() - startTime
+          });
         }
       });
     } catch (error) {
@@ -387,41 +579,80 @@
     }
   }
 
-  function downloadImage(url, key, logger = null) {
+  function downloadImage(url, key, logger = null, forceRetry = false) {
     const cache = getImagesCache();
-    if (cache[key]) {
-      if (logger) {
-        logger("IMAGE_CACHE_HIT", { key });
-      }
-      return Promise.resolve(cache[key]);
-    }
-
-    if (pendingImageDownloads.has(key)) {
-      const existingPromise = pendingImageDownloads.get(key);
-      
-      // Check if this pending download has been stuck too long
-      const now = Date.now();
-      const pendingTimeout = pendingImageTimeouts.get(key);
-      
-      if (pendingTimeout && (now - pendingTimeout) > PENDING_DOWNLOAD_TIMEOUT_MS) {
-        // This download has been pending too long, remove it and retry
+    const now = Date.now();
+    
+    // 1. Enhanced cache-first approach with validity check
+    if (cache[key] && !forceRetry) {
+      const cacheAge = now - cache[key].downloadedAt;
+      if (cacheAge < IMAGE_CACHE_VALIDITY_MS) {
         if (logger) {
-          logger("IMAGE_DOWNLOAD_PENDING_TIMEOUT", { 
+          logger("IMAGE_CACHE_HIT", { 
             key, 
-            timeoutMs: now - pendingTimeout,
-            reason: "pending download timed out, forcing retry"
+            cacheAge,
+            remainingValidity: IMAGE_CACHE_VALIDITY_MS - cacheAge
           });
         }
+        return Promise.resolve(cache[key]);
+      } else {
+        // Cache is stale, remove it and continue to download
+        if (logger) {
+          logger("IMAGE_CACHE_STALE", { 
+            key, 
+            cacheAge,
+            reason: "cache expired, re-downloading"
+          });
+        }
+        revokeBlobUrlsForKeys([key]);
+      }
+    }
+
+    // 2. Check if this image is permanently failed (with cooldown)
+    if (failedImageDownloads.has(key) && !forceRetry) {
+      if (logger) {
+        logger("IMAGE_DOWNLOAD_SKIPPED_FAILED", { 
+          key,
+          reason: "image previously failed, in cooldown period"
+        });
+      }
+      return Promise.reject(new Error("Image download previously failed"));
+    }
+
+    // 3. Enhanced pending download check with better deadlock prevention
+    if (pendingImageDownloads.has(key)) {
+      const existingPromise = pendingImageDownloads.get(key);
+      const pendingTimeout = pendingImageTimeouts.get(key);
+      
+      // More aggressive timeout check - if it's been pending too long, force cleanup
+      if (pendingTimeout && (now - pendingTimeout) > PENDING_DOWNLOAD_TIMEOUT_MS) {
+        if (logger) {
+          logger("IMAGE_DOWNLOAD_DEADLOCK_DETECTED", { 
+            key, 
+            pendingDuration: now - pendingTimeout,
+            reason: "forcing cleanup of stuck download"
+          });
+        }
+        
+        // Force cleanup of the stuck download
         pendingImageDownloads.delete(key);
         pendingImageTimeouts.delete(key);
-        // Continue to create a new download
+        
+        // Mark as failed to prevent immediate retry loops
+        failedImageDownloads.add(key);
+        setTimeout(() => failedImageDownloads.delete(key), FAILED_IMAGE_RETRY_COOLDOWN);
+        
+        return Promise.reject(new Error("Download was stuck, cleared from queue"));
       } else {
         // Still within reasonable time, return the existing promise
         if (logger) {
-          logger("IMAGE_DOWNLOAD_PENDING", { key });
+          logger("IMAGE_DOWNLOAD_PENDING", { 
+            key,
+            pendingDuration: pendingTimeout ? now - pendingTimeout : 0
+          });
         }
         
-        // If no timeout is set yet, set one
+        // Set timeout if not already set
         if (!pendingTimeout) {
           pendingImageTimeouts.set(key, now);
         }
@@ -430,18 +661,41 @@
       }
     }
 
+    // 4. Defer image processing if main process is busy
+    if (imageProcessingDeferred && !forceRetry) {
+      if (logger) {
+        logger("IMAGE_DOWNLOAD_DEFERRED", { 
+          key,
+          reason: "main process busy, deferring image download"
+        });
+      }
+      
+      // Return a promise that will retry after a delay
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          downloadImage(url, key, logger, forceRetry)
+            .then(resolve)
+            .catch(reject);
+        }, 2000 + Math.random() * 2000); // 2-4s delay with jitter
+      });
+    }
+
+    // 5. Queue the download
     if (logger) {
       logger("IMAGE_DOWNLOAD_QUEUED", { 
         key, 
         url,
         queueLength: imageDownloadQueue.length + 1,
-        activeDownloads: activeImageDownloads
+        activeDownloads: activeImageDownloads,
+        deferred: imageProcessingDeferred
       });
     }
     
     const promise = new Promise((resolve, reject) => {
       imageDownloadQueue.push({ url, key, resolve, reject, logger });
-      processImageDownloadQueue();
+      
+      // Process queue asynchronously to avoid blocking
+      setTimeout(() => processImageDownloadQueue(), 0);
     });
 
     const trackedPromise = promise.finally(() => {
@@ -450,7 +704,7 @@
     });
 
     pendingImageDownloads.set(key, trackedPromise);
-    pendingImageTimeouts.set(key, Date.now());
+    pendingImageTimeouts.set(key, now);
     return trackedPromise;
   }
 
@@ -1406,6 +1660,7 @@
         <button onclick="window.showUidManagement()">Manage UIDs</button>
         <button onclick="window.editUids()">Edit UIDs</button>
         <button onclick="window.clearInvalidUids()">Clear Invalid UIDs</button>
+        <button onclick="window.runNetworkDiagnostics()">Network Diagnostics</button>
       </div>
       <div id="status"></div>
       <div style="display: flex; gap: var(--spacing-sm); margin-bottom: var(--spacing-sm); font-size: var(--font-size-xs);">
@@ -1626,7 +1881,18 @@
         'IMAGE_PLACEHOLDER_SET': { type: 'debug', icon: '◻' },
         'IMAGE_RENDER_APPLIED': { type: 'debug', icon: '✓' },
         'IMAGE_RENDER_FAILED': { type: 'error', icon: '✕' },
+        'IMAGE_RENDER_TIMEOUT': { type: 'warning', icon: '⧖' },
         'IMAGE_DOWNLOAD_EMPTY': { type: 'warning', icon: '∅' },
+        'IMAGE_DOWNLOAD_DEADLOCK_DETECTED': { type: 'error', icon: '⚠' },
+        'IMAGE_DOWNLOAD_DEFERRED': { type: 'info', icon: '⏸' },
+        'IMAGE_DOWNLOAD_SKIPPED_FAILED': { type: 'warning', icon: '⚠' },
+        'IMAGE_CACHE_STALE': { type: 'info', icon: '🔄' },
+        'IMAGE_PROCESSING_DEFERRED': { type: 'info', icon: '⏸' },
+        'IMAGE_PROCESSING_RESUMED': { type: 'success', icon: '▶' },
+        'CLEANUP_STALE_DOWNLOADS': { type: 'info', icon: '🧹' },
+        'IMAGE_FAILURE_PATTERN_DETECTED': { type: 'warning', icon: '📊' },
+        'NETWORK_DIAGNOSTICS_COMPLETE': { type: 'success', icon: '🌐' },
+        'NETWORK_DIAGNOSTICS_ERROR': { type: 'error', icon: '🌐' },
         'CONTAINER_ATTEMPT': { type: 'debug', icon: '→' },
         'CONTAINER_SUCCESS': { type: 'success', icon: '✓' },
         'CONTAINER_EMPTY': { type: 'warning', icon: '∅' },
@@ -1967,11 +2233,21 @@
               pageLog("IMAGE_PLACEHOLDER_SET", { key: image.key, entryKey: entry.key });
               // Use a placeholder while loading to avoid OpaqueResponseBlocking
               img.src = IMAGE_PLACEHOLDER_DATA_URL;
-              // Download image in background
+              
+              // Download image in background with enhanced error handling
+              // Use a timeout to prevent indefinite hanging
+              const downloadTimeout = setTimeout(() => {
+                if (img.src === IMAGE_PLACEHOLDER_DATA_URL) {
+                  pageLog("IMAGE_RENDER_TIMEOUT", { key: image.key, entryKey: entry.key });
+                  img.src = IMAGE_ERROR_DATA_URL;
+                }
+              }, 45000); // 45s timeout for image rendering
+              
               downloadImage(image.url, image.key, pageLog)
                 .then(record => {
+                  clearTimeout(downloadTimeout);
                   if (record && record.url) {
-                    pageLog("IMAGE_RENDER_APPLIED", { key: image.key, entryKey: entry.key });
+                    pageLog("IMAGE_RENDER_APPLIED", { key: image.key, entryKey: entry.key, cacheAge: Date.now() - record.downloadedAt });
                     img.src = record.url;
                     // Trigger layout again when the real image swaps in
                     // (because real image height != placeholder height)
@@ -1982,6 +2258,7 @@
                   }
                 })
                 .catch(err => {
+                  clearTimeout(downloadTimeout);
                   pageLog("IMAGE_RENDER_FAILED", { key: image.key, entryKey: entry.key, error: err && err.message ? err.message : String(err) });
                   // Show error placeholder instead of trying to load from cross-origin
                   img.src = IMAGE_ERROR_DATA_URL;
@@ -2100,8 +2377,12 @@
       }
 
       manualRefreshInProgress = true;
+      
+      // Defer image processing during main API calls to prevent blocking
+      deferImageProcessing(true);
       pauseImageDownloads();
-      pageLog("IMAGE_DOWNLOADS_PAUSED", { reason: "manual_refresh" });
+      pageLog("IMAGE_DOWNLOADS_PAUSED", { reason: "manual_refresh_deferred" });
+      pageLog("IMAGE_PROCESSING_DEFERRED", { reason: "main_process_priority" });
 
       setStatus("Starting manual refresh...");
       
@@ -2197,6 +2478,11 @@
           });
         } finally {
           manualRefreshInProgress = false;
+          
+          // Lift image processing deferral first, then resume downloads
+          deferImageProcessing(false);
+          pageLog("IMAGE_PROCESSING_RESUMED", { reason: "main_process_complete" });
+          
           resumeImageDownloads();
           pageLog("IMAGE_DOWNLOADS_RESUMED", { reason: "manual_refresh_complete" });
 
@@ -2373,6 +2659,45 @@
       
       updateUidStatus();
       alert(`Successfully removed ${oldLength - validUids.length} invalid UIDs. Now following ${validUids.length} accounts.`);
+    }
+
+    tab.window.runNetworkDiagnostics = async function runNetworkDiagnostics() {
+      setStatus("Running network diagnostics...");
+      
+      try {
+        const networkInfo = getNetworkDiagnostics();
+        const connectivityResults = await testWeiboConnectivity();
+        
+        pageLog("NETWORK_DIAGNOSTICS_COMPLETE", {
+          networkInfo,
+          connectivityResults,
+          imageStats: {
+            totalAttempts: imageFailureStats.totalAttempts,
+            totalFailures: imageFailureStats.totalFailures,
+            failureRate: imageFailureStats.totalAttempts > 0 ? 
+              ((imageFailureStats.totalFailures / imageFailureStats.totalAttempts) * 100).toFixed(2) + '%' : '0%',
+            recentFailures: imageFailureStats.recentFailures.length
+          }
+        });
+        
+        setStatus("Network diagnostics complete");
+        
+        // Show summary to user
+        const summary = `Network Diagnostics Summary:\n\n` +
+          `Online: ${networkInfo.online ? 'Yes' : 'No'}\n` +
+          `Connection: ${networkInfo.connection ? networkInfo.connection.effectiveType : 'Unknown'}\n` +
+          `Weibo.com: ${connectivityResults.find(r => r.url.includes('weibo.com'))?.success ? 'Reachable' : 'Not reachable'}\n` +
+          `Sinaimg.cn: ${connectivityResults.find(r => r.url.includes('sinaimg.cn'))?.success ? 'Reachable' : 'Not reachable'}\n` +
+          `Image Failure Rate: ${imageFailureStats.totalAttempts > 0 ? ((imageFailureStats.totalFailures / imageFailureStats.totalAttempts) * 100).toFixed(2) + '%' : '0%'}\n\n` +
+          `Check the logs for detailed information.`;
+        
+        alert(summary);
+        
+      } catch (error) {
+        pageLog("NETWORK_DIAGNOSTICS_ERROR", { error: error.message });
+        setStatus("Network diagnostics failed");
+        alert(`Network diagnostics failed: ${error.message}`);
+      }
     }
 
     // Helper function for modal close button
