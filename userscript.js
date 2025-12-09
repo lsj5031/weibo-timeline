@@ -1069,6 +1069,15 @@
           log("CONTAINER_SUCCESS", { uid, containerid, cards: json.data.cards.length });
           return json; // success, stop trying
         }
+        
+        // NEW LOGIC: Check for empty timeline vs real error
+        if (json && json.ok === 0 && json.msg === "这里还没有内容") {
+          // Empty timeline: Account exists but has no posts yet
+          log("UID_EMPTY_TIMELINE", { uid, containerid, reason: "Empty timeline (no posts yet)" });
+          // Return empty but valid response instead of throwing error
+          return { ok: 0, data: { cards: [] }, msg: json.msg };
+        }
+        
         log("CONTAINER_EMPTY", { uid, containerid });
       } catch (e) {
         log("CONTAINER_ERROR", { uid, containerid, error: e && e.message ? e.message : String(e) });
@@ -2019,6 +2028,7 @@
         'CONTAINER_ERROR': { type: 'error', icon: '✕' },
         'CONTAINER_ALL_FAILED': { type: 'error', icon: '✕' },
         'RETRY_ON_HANG': { type: 'warning', icon: '↻' },
+        'UID_EMPTY_TIMELINE': { type: 'info', icon: '∅' },
         'Dashboard opened': { type: 'success', icon: '✓' }
       };
 
