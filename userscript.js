@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.3.1)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.4.0)
 // @namespace    http://tampermonkey.net/
-// @version      4.3.1
+// @version      4.4.0
 // @description  Enhanced Weibo timeline: v4.3.1 adds per-UID hard timeout failsafe so a single stalled account can’t lock up manual refresh. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
@@ -66,6 +66,7 @@
   // Runtime state
   let manualRefreshInProgress = false;
   let lastRefreshTime = null;
+  let deferRenderingDuringRefresh = false;
 
   // UID health tracking
   const HEALTH_VALID = 'valid';
@@ -175,14 +176,75 @@
   const PENDING_DOWNLOAD_TIMEOUT_MS = 45000; // 45 seconds timeout for stuck pending downloads
   const FAILED_IMAGE_RETRY_COOLDOWN = 300000; // 5 minutes before retrying failed images
   const IMAGE_CACHE_VALIDITY_MS = 3600000; // 1 hour cache validity
+  const IMAGE_CACHE_SOFT_LIMIT = 500; // Maximum blobs to keep in memory
   // 3. Ensure the cache object exists
   let imagesCache = null;
   function getImagesCache() {
     if (!imagesCache) {
       imagesCache = {};
     }
+    
+    // Evict old/least-used entries if over soft limit
+    const now = Date.now();
+    const keys = Object.keys(imagesCache);
+    
+    if (keys.length > IMAGE_CACHE_SOFT_LIMIT) {
+      // Sort by lastAccessed (LRU eviction)
+      keys.sort((a, b) => {
+        const accessA = imagesCache[a].lastAccessed || imagesCache[a].downloadedAt;
+        const accessB = imagesCache[b].lastAccessed || imagesCache[b].downloadedAt;
+        return accessA - accessB;
+      });
+      
+      const toEvict = keys.slice(0, keys.length - IMAGE_CACHE_SOFT_LIMIT);
+      toEvict.forEach(key => {
+        if (imagesCache[key].url.startsWith('blob:')) {
+          URL.revokeObjectURL(imagesCache[key].url);
+          activeBlobUrls.delete(imagesCache[key].url);
+        }
+        delete imagesCache[key];
+      });
+      
+      if (toEvict.length > 0) {
+        pageLog("IMAGE_CACHE_EVICTED", { 
+          evicted: toEvict.length, 
+          remaining: Object.keys(imagesCache).length,
+          reason: "soft_limit_exceeded"
+        });
+      }
+    }
+    
     return imagesCache;
   }
+  
+  // Run cache cleanup every 5 minutes
+  setInterval(() => {
+    const cache = getImagesCache();
+    const now = Date.now();
+    const keys = Object.keys(cache);
+    let evictedStale = 0;
+    
+    // Remove stale entries (> 1 hour old)
+    keys.forEach(key => {
+      const cacheAge = now - cache[key].downloadedAt;
+      if (cacheAge > IMAGE_CACHE_VALIDITY_MS) {
+        if (cache[key].url.startsWith('blob:')) {
+          URL.revokeObjectURL(cache[key].url);
+          activeBlobUrls.delete(cache[key].url);
+        }
+        delete cache[key];
+        evictedStale++;
+      }
+    });
+    
+    if (evictedStale > 0) {
+      pageLog("IMAGE_CACHE_EVICTED", { 
+        evicted: evictedStale,
+        remaining: Object.keys(cache).length,
+        reason: "stale_entries"
+      });
+    }
+  }, 300000); // 5 minutes
 
   function pauseImageDownloads() {
     imageDownloadsPaused = true;
@@ -523,10 +585,12 @@
               const blobUrl = URL.createObjectURL(response.response);
               activeBlobUrls.add(blobUrl);
               const cache = getImagesCache();
+              const now = Date.now();
               const record = {
                 url: blobUrl,
                 originalUrl: url,
-                downloadedAt: Date.now(),
+                downloadedAt: now,
+                lastAccessed: now,
                 size: response.response.size,
                 mimeType: response.response.type
               };
@@ -587,6 +651,9 @@
     if (cache[key] && !forceRetry) {
       const cacheAge = now - cache[key].downloadedAt;
       if (cacheAge < IMAGE_CACHE_VALIDITY_MS) {
+        // Update last accessed time for LRU eviction
+        cache[key].lastAccessed = now;
+        
         if (logger) {
           logger("IMAGE_CACHE_HIT", { 
             key, 
@@ -1938,8 +2005,10 @@
         'IMAGE_DOWNLOAD_DEFERRED': { type: 'info', icon: '⏸' },
         'IMAGE_DOWNLOAD_SKIPPED_FAILED': { type: 'warning', icon: '⚠' },
         'IMAGE_CACHE_STALE': { type: 'info', icon: '🔄' },
+        'IMAGE_CACHE_EVICTED': { type: 'info', icon: '🧹' },
         'IMAGE_PROCESSING_DEFERRED': { type: 'info', icon: '⏸' },
         'IMAGE_PROCESSING_RESUMED': { type: 'success', icon: '▶' },
+        'TIMELINE_RENDERED': { type: 'success', icon: '✓' },
         'CLEANUP_STALE_DOWNLOADS': { type: 'info', icon: '🧹' },
         'IMAGE_FAILURE_PATTERN_DETECTED': { type: 'warning', icon: '📊' },
         'NETWORK_DIAGNOSTICS_COMPLETE': { type: 'success', icon: '🌐' },
@@ -2196,6 +2265,66 @@
     tab.window.addEventListener('resize', triggerLayout);
 
     // ---------------------------------------------------------------
+    // LAZY IMAGE LOADING WITH INTERSECTION OBSERVER
+    // ---------------------------------------------------------------
+    
+    let imageObserver = null;
+    
+    function setupImageObserver() {
+      if (imageObserver) return imageObserver;
+      
+      imageObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            const img = entry.target;
+            const imageUrl = img.dataset.imageUrl;
+            const imageKey = img.dataset.imageKey;
+            const entryKey = img.dataset.entryKey;
+            
+            if (!imageUrl || !imageKey) return;
+            
+            // Stop observing this image
+            imageObserver.unobserve(img);
+            
+            // Check cache first
+            const downloadedImages = getImagesCache();
+            if (downloadedImages[imageKey]) {
+              img.src = downloadedImages[imageKey].url;
+              return;
+            }
+            
+            // Download the image
+            const downloadTimeout = setTimeout(() => {
+              if (img.src === IMAGE_PLACEHOLDER_DATA_URL) {
+                img.src = IMAGE_ERROR_DATA_URL;
+              }
+            }, 45000);
+            
+            downloadImage(imageUrl, imageKey, pageLog)
+              .then(record => {
+                clearTimeout(downloadTimeout);
+                if (record && record.url) {
+                  img.src = record.url;
+                  triggerLayout();
+                } else {
+                  img.src = IMAGE_ERROR_DATA_URL;
+                }
+              })
+              .catch(err => {
+                clearTimeout(downloadTimeout);
+                img.src = IMAGE_ERROR_DATA_URL;
+              });
+          }
+        });
+      }, {
+        rootMargin: '200px', // Start loading 200px before image enters viewport
+        threshold: 0.01
+      });
+      
+      return imageObserver;
+    }
+
+    // ---------------------------------------------------------------
     // RENDER TIMELINE
     // ---------------------------------------------------------------
 
@@ -2240,6 +2369,7 @@
 
       const limited = entries.slice(0, currentRenderCount);
       const downloadedImages = getImagesCache();
+      const observer = setupImageObserver();
 
       listEl.innerHTML = "";
       limited.forEach(entry => {
@@ -2303,44 +2433,18 @@
             // IMPORTANT: Trigger layout when image dimensions are known
             img.onload = () => triggerLayout();
 
-            // Try to use downloaded image first, or download it
+            // Store image data in dataset for lazy loading
+            img.dataset.imageUrl = image.url;
+            img.dataset.imageKey = image.key;
+            img.dataset.entryKey = entry.key;
+
+            // Try to use downloaded image first (cache hit)
             if (downloadedImages[image.key]) {
-              pageLog("IMAGE_CACHE_APPLIED", { key: image.key, entryKey: entry.key });
               img.src = downloadedImages[image.key].url;
             } else {
-              pageLog("IMAGE_PLACEHOLDER_SET", { key: image.key, entryKey: entry.key });
-              // Use a placeholder while loading to avoid OpaqueResponseBlocking
+              // Use placeholder and let IntersectionObserver handle download
               img.src = IMAGE_PLACEHOLDER_DATA_URL;
-              
-              // Download image in background with enhanced error handling
-              // Use a timeout to prevent indefinite hanging
-              const downloadTimeout = setTimeout(() => {
-                if (img.src === IMAGE_PLACEHOLDER_DATA_URL) {
-                  pageLog("IMAGE_RENDER_TIMEOUT", { key: image.key, entryKey: entry.key });
-                  img.src = IMAGE_ERROR_DATA_URL;
-                }
-              }, 45000); // 45s timeout for image rendering
-              
-              downloadImage(image.url, image.key, pageLog)
-                .then(record => {
-                  clearTimeout(downloadTimeout);
-                  if (record && record.url) {
-                    pageLog("IMAGE_RENDER_APPLIED", { key: image.key, entryKey: entry.key, cacheAge: Date.now() - record.downloadedAt });
-                    img.src = record.url;
-                    // Trigger layout again when the real image swaps in
-                    // (because real image height != placeholder height)
-                    triggerLayout(); 
-                  } else {
-                    pageLog("IMAGE_DOWNLOAD_EMPTY", { key: image.key, entryKey: entry.key });
-                    img.src = IMAGE_ERROR_DATA_URL;
-                  }
-                })
-                .catch(err => {
-                  clearTimeout(downloadTimeout);
-                  pageLog("IMAGE_RENDER_FAILED", { key: image.key, entryKey: entry.key, error: err && err.message ? err.message : String(err) });
-                  // Show error placeholder instead of trying to load from cross-origin
-                  img.src = IMAGE_ERROR_DATA_URL;
-                });
+              observer.observe(img);
             }
 
             img.onclick = () => {
@@ -2455,6 +2559,7 @@
       }
 
       manualRefreshInProgress = true;
+      deferRenderingDuringRefresh = true;
       
       // Defer image processing during main API calls to prevent blocking
       deferImageProcessing(true);
@@ -2580,6 +2685,12 @@
           });
         } finally {
           manualRefreshInProgress = false;
+          deferRenderingDuringRefresh = false;
+          
+          // Render once after all updates
+          renderTimeline();
+          updateUidStatus();
+          pageLog("TIMELINE_RENDERED", { reason: "batch_refresh_complete" });
           
           // Lift image processing deferral first, then resume downloads
           deferImageProcessing(false);
@@ -2955,8 +3066,12 @@
             added,
             totalEntries: Object.keys(timeline).length
           });
-          renderTimeline();
-          updateUidStatus();
+          
+          // Only render if not in batch mode during manual refresh
+          if (!deferRenderingDuringRefresh) {
+            renderTimeline();
+            updateUidStatus();
+          }
         } else {
           pageLog("PROCESS_DONE", { uid, added: 0 });
           // Always update health to track frequency counters, even if status doesn't change
