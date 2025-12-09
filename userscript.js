@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.4.1)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.4.2)
 // @namespace    http://tampermonkey.net/
-// @version      4.4.1
-// @description  Enhanced Weibo timeline: v4.4.1 fixes image loading in popup (self-contained data URL dashboard), resolves scope issues with lazy loading/observer, unblocks manual refresh hangs via improved error isolation and popup injection. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
+// @version      4.4.2
+// @description  Enhanced Weibo timeline: v4.4.2 fixes network diagnostic failure on weibo.com by using GM_xmlhttpRequest. v4.4.1 fixes image loading in popup (self-contained data URL dashboard), resolves scope issues with lazy loading/observer, unblocks manual refresh hangs via improved error isolation and popup injection. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -325,11 +325,34 @@
     for (const url of testUrls) {
       try {
         const startTime = Date.now();
-        const response = await fetch(url, { 
-          method: 'HEAD', 
-          mode: 'no-cors',
-          cache: 'no-cache'
+        
+        await new Promise((resolve, reject) => {
+          gmRequest({
+            method: 'GET',
+            url: url,
+            timeout: 15000,
+            headers: {
+              "User-Agent": navigator.userAgent,
+              "Cache-Control": "no-cache",
+              "Referer": "https://weibo.com/",
+              "Origin": "https://weibo.com"
+            },
+            onload: (response) => {
+              if (response.status >= 200 && response.status < 400) {
+                resolve(response);
+              } else {
+                reject(new Error(`HTTP ${response.status}`));
+              }
+            },
+            onerror: (error) => {
+              reject(new Error("Network error"));
+            },
+            ontimeout: () => {
+              reject(new Error("Timeout"));
+            }
+          });
         });
+
         const duration = Date.now() - startTime;
         results.push({
           url,
