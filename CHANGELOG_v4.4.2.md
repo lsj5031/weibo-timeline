@@ -13,7 +13,9 @@
 ## 📝 Technical Details
 
 - Replaced `fetch` loop in `testWeiboConnectivity` with `gmRequest` wrapped in a Promise.
-- Preserved `HEAD` method and user-agent masking.
+- Switched method from `HEAD` to `GET` to mimic normal browser traffic and avoid some anti-bot blocks.
+- Added `Referer` and `Origin` headers (set to `https://weibo.com`) to satisfy server requirements.
+- Added response status validation (treats 200-399 as success, others as failure).
 - Maintained compatibility with the existing `results` structure.
 
 ---

@@ -328,15 +328,21 @@
         
         await new Promise((resolve, reject) => {
           gmRequest({
-            method: 'HEAD',
+            method: 'GET',
             url: url,
             timeout: 15000,
             headers: {
               "User-Agent": navigator.userAgent,
-              "Cache-Control": "no-cache"
+              "Cache-Control": "no-cache",
+              "Referer": "https://weibo.com/",
+              "Origin": "https://weibo.com"
             },
             onload: (response) => {
-              resolve(response);
+              if (response.status >= 200 && response.status < 400) {
+                resolve(response);
+              } else {
+                reject(new Error(`HTTP ${response.status}`));
+              }
             },
             onerror: (error) => {
               reject(new Error("Network error"));
