@@ -803,14 +803,65 @@
     return /^\d{6,11}$/.test(uid);
   }
 
-  function updateUidHealth(uid, status) {
+  function updateUidHealth(uid, status, newPostsCount = 0) {
     const health = loadUidHealth();
-    health[uid] = {
-      status,
-      lastChecked: Date.now(),
-      lastSuccess: status === HEALTH_VALID ? Date.now() : (health[uid]?.lastSuccess || null)
+    const now = Date.now();
+    
+    let record = health[uid] || {
+      status: HEALTH_UNKNOWN,
+      lastChecked: 0,
+      lastSuccess: 0,
+      frequencyLabel: 'high',
+      checkInterval: 1,
+      skippedChecks: 0,
+      consecutiveZeroUpdates: 0
     };
+
+    // Preserve existing values if strictly updating status
+    record.status = status;
+    record.lastChecked = now;
+    if (status === HEALTH_VALID) {
+      record.lastSuccess = now;
+    }
+    
+    // Reset skipped checks because we just performed a check (or tried to)
+    record.skippedChecks = 0;
+
+    if (newPostsCount > 0) {
+      // Activity detected! Reset to high frequency
+      record.frequencyLabel = 'high';
+      record.checkInterval = 1;
+      record.consecutiveZeroUpdates = 0;
+    } else if (status === HEALTH_VALID || status === HEALTH_STALLED) {
+      // Valid check but no new posts
+      record.consecutiveZeroUpdates = (record.consecutiveZeroUpdates || 0) + 1;
+      
+      // Downgrade frequency based on consecutive zero updates
+      if (record.consecutiveZeroUpdates > 50) {
+        record.frequencyLabel = 'rare';
+        record.checkInterval = 20; // Check 1 in 20
+      } else if (record.consecutiveZeroUpdates > 15) {
+        record.frequencyLabel = 'low';
+        record.checkInterval = 5; // Check 1 in 5
+      } else if (record.consecutiveZeroUpdates > 3) {
+        record.frequencyLabel = 'medium';
+        record.checkInterval = 2; // Check 1 in 2
+      } else {
+        record.frequencyLabel = 'high';
+        record.checkInterval = 1;
+      }
+    }
+    
+    health[uid] = record;
     saveUidHealth(health);
+  }
+
+  function updateUidSkippedChecks(uid, skippedChecks) {
+    const health = loadUidHealth();
+    if (health[uid]) {
+      health[uid].skippedChecks = skippedChecks;
+      saveUidHealth(health);
+    }
   }
 
   function getUidHealth(uid) {
@@ -2059,11 +2110,21 @@
       const stalled = Object.values(health).filter(h => h.status === HEALTH_STALLED).length;
       const unknown = total - valid - invalid - stalled;
       
+      const freqHigh = Object.values(health).filter(h => h.frequencyLabel === 'high' || !h.frequencyLabel).length;
+      const freqMed = Object.values(health).filter(h => h.frequencyLabel === 'medium').length;
+      const freqLow = Object.values(health).filter(h => h.frequencyLabel === 'low').length;
+      const freqRare = Object.values(health).filter(h => h.frequencyLabel === 'rare').length;
+      
       uidStatusEl.innerHTML = `
         <span class="uid-status-item valid">Valid: ${valid}</span>
         <span class="uid-status-item invalid">Invalid: ${invalid}</span>
         <span class="uid-status-item stalled">Stalled: ${stalled}</span>
         <span class="uid-status-item unknown">Unknown: ${unknown}</span>
+        <span style="margin-left: 10px; opacity: 0.7;">|</span>
+        <span class="uid-status-item" style="background:#e0f2fe; color:#0369a1" title="Check every time">High: ${freqHigh}</span>
+        <span class="uid-status-item" style="background:#f0f9ff; color:#0c4a6e" title="Check 1/2 times">Mid: ${freqMed}</span>
+        <span class="uid-status-item" style="background:#f8fafc; color:#334155" title="Check 1/5 times">Low: ${freqLow}</span>
+        <span class="uid-status-item" style="background:#f1f5f9; color:#475569" title="Check 1/20 times">Rare: ${freqRare}</span>
       `;
     }
 
@@ -2422,6 +2483,30 @@
         try {
           for (let i = startIndex; i < currentUsers.length; i++) {
             const uid = currentUsers[i];
+            
+            // Frequency-based skipping logic
+            const health = getUidHealth(uid);
+            const checkInterval = health.checkInterval || 1;
+            let skippedChecks = health.skippedChecks || 0;
+            
+            if (skippedChecks < checkInterval - 1) {
+              skippedChecks++;
+              updateUidSkippedChecks(uid, skippedChecks);
+              pageLog("SKIP_UID", { 
+                uid, 
+                reason: "low_frequency", 
+                label: health.frequencyLabel, 
+                skipped: skippedChecks, 
+                interval: checkInterval 
+              });
+              
+              // Minimal delay when skipping to keep UI responsive
+              if (i < currentUsers.length - 1) {
+                 await sleep(50); 
+              }
+              continue; 
+            }
+
             const progress = Math.round(((i + 1) / currentUsers.length) * 100);
             setStatus(`Fetching account ${i + 1}/${currentUsers.length} (${progress}%)…`);
 
@@ -2845,7 +2930,7 @@
           }
           // ---------------------------
 
-          updateUidHealth(uid, HEALTH_VALID);
+          updateUidHealth(uid, HEALTH_VALID, added);
           saveTimeline(timeline);
           pageLog("PROCESS_DONE", {
             uid,
@@ -2856,11 +2941,17 @@
           updateUidStatus();
         } else {
           pageLog("PROCESS_DONE", { uid, added: 0 });
-          // Mark as stalled if no new posts but API was successful
+          // Always update health to track frequency counters, even if status doesn't change
           const existingHealth = getUidHealth(uid);
-          if (existingHealth.status !== HEALTH_VALID) {
-            updateUidHealth(uid, HEALTH_STALLED);
+          let newStatus = existingHealth.status;
+          
+          // If previously invalid/unknown, mark as stalled (successful check but no content)
+          // If already valid, keep as valid
+          if (newStatus !== HEALTH_VALID) {
+            newStatus = HEALTH_STALLED;
           }
+          
+          updateUidHealth(uid, newStatus, 0);
         }
 
         // Save this UID as the last successfully processed
