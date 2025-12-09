@@ -166,9 +166,11 @@
 
   const imageDownloadQueue = [];
   const pendingImageDownloads = new Map();
+  const pendingImageTimeouts = new Map();
   let activeImageDownloads = 0;
   let imageDownloadsPaused = false;
   const activeBlobUrls = new Set();
+  const PENDING_DOWNLOAD_TIMEOUT_MS = 60000; // 60 seconds timeout for stuck pending downloads
   // 3. Ensure the cache object exists
   let imagesCache = null;
   function getImagesCache() {
@@ -395,10 +397,37 @@
     }
 
     if (pendingImageDownloads.has(key)) {
-      if (logger) {
-        logger("IMAGE_DOWNLOAD_PENDING", { key });
+      const existingPromise = pendingImageDownloads.get(key);
+      
+      // Check if this pending download has been stuck too long
+      const now = Date.now();
+      const pendingTimeout = pendingImageTimeouts.get(key);
+      
+      if (pendingTimeout && (now - pendingTimeout) > PENDING_DOWNLOAD_TIMEOUT_MS) {
+        // This download has been pending too long, remove it and retry
+        if (logger) {
+          logger("IMAGE_DOWNLOAD_PENDING_TIMEOUT", { 
+            key, 
+            timeoutMs: now - pendingTimeout,
+            reason: "pending download timed out, forcing retry"
+          });
+        }
+        pendingImageDownloads.delete(key);
+        pendingImageTimeouts.delete(key);
+        // Continue to create a new download
+      } else {
+        // Still within reasonable time, return the existing promise
+        if (logger) {
+          logger("IMAGE_DOWNLOAD_PENDING", { key });
+        }
+        
+        // If no timeout is set yet, set one
+        if (!pendingTimeout) {
+          pendingImageTimeouts.set(key, now);
+        }
+        
+        return existingPromise;
       }
-      return pendingImageDownloads.get(key);
     }
 
     if (logger) {
@@ -417,9 +446,11 @@
 
     const trackedPromise = promise.finally(() => {
       pendingImageDownloads.delete(key);
+      pendingImageTimeouts.delete(key);
     });
 
     pendingImageDownloads.set(key, trackedPromise);
+    pendingImageTimeouts.set(key, Date.now());
     return trackedPromise;
   }
 
@@ -1587,6 +1618,9 @@
         'IMAGE_DOWNLOAD_RETRY': { type: 'warning', icon: '↻' },
         'IMAGE_DOWNLOAD_FAILED': { type: 'error', icon: '✕' },
         'IMAGE_DOWNLOAD_FAILSAFE': { type: 'warning', icon: '⧖' },
+        'IMAGE_DOWNLOAD_ABORTING': { type: 'warning', icon: '⧖' },
+        'IMAGE_DOWNLOAD_ABORT_FAILED': { type: 'error', icon: '✕' },
+        'IMAGE_DOWNLOAD_PENDING_TIMEOUT': { type: 'warning', icon: '⧖' },
         'IMAGE_CACHE_HIT': { type: 'debug', icon: '⚡' },
         'IMAGE_CACHE_APPLIED': { type: 'debug', icon: '⚡' },
         'IMAGE_PLACEHOLDER_SET': { type: 'debug', icon: '◻' },
