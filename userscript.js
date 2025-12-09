@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.4.0)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.4.1)
 // @namespace    http://tampermonkey.net/
-// @version      4.4.0
-// @description  Enhanced Weibo timeline: v4.3.1 adds per-UID hard timeout failsafe so a single stalled account can’t lock up manual refresh. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
+// @version      4.4.1
+// @description  Enhanced Weibo timeline: v4.4.1 fixes image loading in popup (self-contained data URL dashboard), resolves scope issues with lazy loading/observer, unblocks manual refresh hangs via improved error isolation and popup injection. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -206,7 +206,7 @@
       });
       
       if (toEvict.length > 0) {
-        pageLog("IMAGE_CACHE_EVICTED", { 
+        console.log("[WeiboTimeline] IMAGE_CACHE_EVICTED", { 
           evicted: toEvict.length, 
           remaining: Object.keys(imagesCache).length,
           reason: "soft_limit_exceeded"
@@ -238,7 +238,7 @@
     });
     
     if (evictedStale > 0) {
-      pageLog("IMAGE_CACHE_EVICTED", { 
+      console.log("[WeiboTimeline] IMAGE_CACHE_EVICTED", { 
         evicted: evictedStale,
         remaining: Object.keys(cache).length,
         reason: "stale_entries"
@@ -283,7 +283,7 @@
         setTimeout(() => failedImageDownloads.delete(key), FAILED_IMAGE_RETRY_COOLDOWN);
       }
       
-      pageLog("CLEANUP_STALE_DOWNLOADS", {
+      console.log("[WeiboTimeline] CLEANUP_STALE_DOWNLOADS", {
         cleanedCount: staleKeys.length,
         staleKeys
       });
@@ -370,7 +370,7 @@
       const networkInfo = getNetworkDiagnostics();
       const connectivityResults = await testWeiboConnectivity();
       
-      pageLog("IMAGE_FAILURE_PATTERN_DETECTED", {
+      console.log("[WeiboTimeline] IMAGE_FAILURE_PATTERN_DETECTED", {
         recentFailures: recentFailures.length,
         totalAttempts: imageFailureStats.totalAttempts,
         totalFailures: imageFailureStats.totalFailures,
@@ -2276,54 +2276,80 @@
 
     // ---------------------------------------------------------------
     // LAZY IMAGE LOADING WITH INTERSECTION OBSERVER
+    // v4.4.1: Enhanced error isolation and scope handling
     // ---------------------------------------------------------------
     
     let imageObserver = null;
     
+    // Store references to functions that will be called from observer
+    // This ensures proper scope binding even in async callbacks
+    const observerContext = {
+      getImagesCache: getImagesCache,
+      downloadImage: downloadImage,
+      pageLog: pageLog,
+      triggerLayout: triggerLayout,
+      IMAGE_PLACEHOLDER_DATA_URL: IMAGE_PLACEHOLDER_DATA_URL,
+      IMAGE_ERROR_DATA_URL: IMAGE_ERROR_DATA_URL
+    };
+    
     function setupImageObserver() {
       if (imageObserver) return imageObserver;
       
+      // Create observer with proper error isolation
       imageObserver = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
-          if (entry.isIntersecting) {
+          // Wrap in try-catch for improved error isolation
+          try {
+            if (!entry.isIntersecting) return;
+            
             const img = entry.target;
             const imageUrl = img.dataset.imageUrl;
             const imageKey = img.dataset.imageKey;
-            const entryKey = img.dataset.entryKey;
             
             if (!imageUrl || !imageKey) return;
             
-            // Stop observing this image
+            // Stop observing this image immediately
             imageObserver.unobserve(img);
             
-            // Check cache first
-            const downloadedImages = getImagesCache();
+            // Check cache first using stored reference
+            const downloadedImages = observerContext.getImagesCache();
             if (downloadedImages[imageKey]) {
+              // Update lastAccessed for LRU tracking
+              downloadedImages[imageKey].lastAccessed = Date.now();
               img.src = downloadedImages[imageKey].url;
+              observerContext.pageLog("IMAGE_CACHE_APPLIED", { key: imageKey, fromObserver: true });
               return;
             }
             
-            // Download the image
+            // Set up download timeout with proper reference
             const downloadTimeout = setTimeout(() => {
-              if (img.src === IMAGE_PLACEHOLDER_DATA_URL) {
-                img.src = IMAGE_ERROR_DATA_URL;
+              if (img.src === observerContext.IMAGE_PLACEHOLDER_DATA_URL) {
+                img.src = observerContext.IMAGE_ERROR_DATA_URL;
+                observerContext.pageLog("IMAGE_RENDER_TIMEOUT", { key: imageKey });
               }
             }, 45000);
             
-            downloadImage(imageUrl, imageKey, pageLog)
+            // Download the image using stored reference
+            observerContext.downloadImage(imageUrl, imageKey, observerContext.pageLog)
               .then(record => {
                 clearTimeout(downloadTimeout);
                 if (record && record.url) {
                   img.src = record.url;
-                  triggerLayout();
+                  observerContext.pageLog("IMAGE_RENDER_APPLIED", { key: imageKey });
+                  observerContext.triggerLayout();
                 } else {
-                  img.src = IMAGE_ERROR_DATA_URL;
+                  img.src = observerContext.IMAGE_ERROR_DATA_URL;
+                  observerContext.pageLog("IMAGE_RENDER_FAILED", { key: imageKey, reason: "no_url" });
                 }
               })
               .catch(err => {
                 clearTimeout(downloadTimeout);
-                img.src = IMAGE_ERROR_DATA_URL;
+                img.src = observerContext.IMAGE_ERROR_DATA_URL;
+                observerContext.pageLog("IMAGE_RENDER_FAILED", { key: imageKey, error: err.message });
               });
+          } catch (observerError) {
+            // Isolate errors to prevent one image failure from affecting others
+            console.error("[WeiboTimeline] Observer error:", observerError);
           }
         });
       }, {
@@ -2450,6 +2476,8 @@
 
             // Try to use downloaded image first (cache hit)
             if (downloadedImages[image.key]) {
+              // Update lastAccessed for LRU tracking
+              downloadedImages[image.key].lastAccessed = Date.now();
               img.src = downloadedImages[image.key].url;
             } else {
               // Use placeholder and let IntersectionObserver handle download
@@ -2458,8 +2486,15 @@
             }
 
             img.onclick = () => {
-              lightboxImg.src = img.src;
-              lightbox.classList.add('active');
+              try {
+                // Only open lightbox if we have a valid image (not placeholder/error)
+                if (img.src && !img.src.includes('data:image/svg+xml')) {
+                  lightboxImg.src = img.src;
+                  lightbox.classList.add('active');
+                }
+              } catch (e) {
+                console.error("[WeiboTimeline] Lightbox error:", e);
+              }
             };
 
             imgContainer.appendChild(img);
