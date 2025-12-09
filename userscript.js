@@ -2212,11 +2212,17 @@
         return;
       }
 
-      // Sort by actual post creation time (FIXED)
+      // Sort by actual post creation time (FIXED), with "Bump" for late discoveries
       entries.sort((a, b) => {
-        const timeA = parseWeiboTime(a.createdAt);
-        const timeB = parseWeiboTime(b.createdAt);
-        return timeB - timeA;
+        const timeA = a.created_ts || parseWeiboTime(a.createdAt);
+        const timeB = b.created_ts || parseWeiboTime(b.createdAt);
+        
+        // "Bump" strategy: If a post was imported > 24h after creation, treat its time as import time
+        // This ensures missed posts appearing after a long skip period pop up at the top
+        const effectiveTimeA = (a.importedAt && (a.importedAt - timeA > 86400000)) ? a.importedAt : timeA;
+        const effectiveTimeB = (b.importedAt && (b.importedAt - timeB > 86400000)) ? b.importedAt : timeB;
+        
+        return effectiveTimeB - effectiveTimeA;
       });
       
       // Show/hide footer based on whether there are more items to load
@@ -2263,6 +2269,17 @@
           timeSpan.textContent = timeAgo(entry.created_ts);
           timeSpan.title = entry.createdAt; // Show full date on hover
           meta.appendChild(timeSpan);
+
+          // Badge for Late Discovery (Missed posts)
+          // If imported > 24h after creation, it means we missed it.
+          if (entry.importedAt && (entry.importedAt - entry.created_ts > 86400000)) {
+             const newBadge = doc.createElement("span");
+             // Use subtle blue style
+             newBadge.style.cssText = "background:rgba(59,130,246,0.1); color:#2563eb; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:600; margin-left:6px; border:1px solid rgba(59,130,246,0.2);";
+             newBadge.textContent = "NEWLY FOUND";
+             newBadge.title = `Post date: ${entry.createdAt}\nDiscovered: ${new Date(entry.importedAt).toLocaleString()}`;
+             meta.appendChild(newBadge);
+          }
         }
 
         const textDiv = doc.createElement("div");
@@ -2892,6 +2909,7 @@
             text: plainText,
             createdAt,
             created_ts,
+            importedAt: Date.now(),
             link,
             images: images,
             isRetweet: isRetweet
