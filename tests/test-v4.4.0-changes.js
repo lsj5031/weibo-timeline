@@ -80,10 +80,10 @@ if (scriptContent.match(/setInterval.*300000/s)) {
   allPassed = false;
 }
 
-// Test 4: Check version bump
+// Test 4: Check version bump (now 4.4.1+)
 console.log('\nTest 4: Version update');
-if (scriptContent.includes('// @version      4.4.0')) {
-  console.log('  ✅ Version bumped to 4.4.0');
+if (scriptContent.includes('// @version      4.4.') && (scriptContent.includes('4.4.0') || scriptContent.includes('4.4.1'))) {
+  console.log('  ✅ Version is 4.4.x');
 } else {
   console.log('  ❌ Version not updated');
   allPassed = false;
