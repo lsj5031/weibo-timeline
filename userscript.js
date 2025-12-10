@@ -995,19 +995,30 @@
       });
     }
 
-    // 5. Queue the download
+    // 5. Queue the download (prioritize visible images by adding to front)
+    // Images from IntersectionObserver have a logger, background queue doesn't
+    const isFromObserver = logger !== null;
+    
     if (logger) {
       logger("IMAGE_DOWNLOAD_QUEUED", { 
         key, 
         url,
         queueLength: imageDownloadQueue.length + 1,
         activeDownloads: activeImageDownloads,
-        deferred: imageProcessingDeferred
+        deferred: imageProcessingDeferred,
+        priority: isFromObserver ? 'high' : 'low'
       });
     }
     
     const promise = new Promise((resolve, reject) => {
-      imageDownloadQueue.push({ url, key, resolve, reject, logger });
+      const task = { url, key, resolve, reject, logger };
+      
+      // Prioritize visible images (from observer) by adding to front of queue
+      if (isFromObserver) {
+        imageDownloadQueue.unshift(task);
+      } else {
+        imageDownloadQueue.push(task);
+      }
       
       // Process queue asynchronously to avoid blocking
       setTimeout(() => processImageDownloadQueue(), 0);
@@ -2404,8 +2415,8 @@
         'PREFLIGHT_CHECK_START': { type: 'info', icon: '🔍' },
         'PREFLIGHT_CHECK_COMPLETE': { type: 'success', icon: '✓' },
         'PREFLIGHT_CHECK_FAILED': { type: 'error', icon: '✕' },
-        'IMAGE_OBSERVER_SETUP': { type: 'debug', icon: '👁' },
-        'IMAGE_OBSERVER_TRIGGERED': { type: 'debug', icon: '👁' },
+        'IMAGE_OBSERVER_SETUP': { type: 'info', icon: '👁' },
+        'IMAGE_OBSERVER_TRIGGERED': { type: 'info', icon: '👁' },
         'INITIAL_RENDER_START': { type: 'info', icon: '🎨' },
         'INITIAL_RENDER_COMPLETE': { type: 'success', icon: '✓' },
         'RENDER_IMAGE_STATS': { type: 'info', icon: '📊' },
@@ -2421,8 +2432,8 @@
         'IDB_INIT_ERROR': { type: 'error', icon: '💾' },
         'IDB_CACHE_LOADED': { type: 'success', icon: '💾' },
         'CACHE_POST_APPLY': { type: 'info', icon: '🖼' },
-        'INIT_ASYNC_START': { type: 'debug', icon: '▶' },
-        'INIT_ASYNC_RUNNING': { type: 'debug', icon: '▶' },
+        'INIT_ASYNC_START': { type: 'info', icon: '▶' },
+        'INIT_ASYNC_RUNNING': { type: 'info', icon: '▶' },
         'INIT_SCHEDULING_QUEUE': { type: 'debug', icon: '⏱' },
         'INIT_QUEUE_TIMEOUT_FIRED': { type: 'info', icon: '🔔' },
         'BACKGROUND_QUEUE_SCANNING': { type: 'debug', icon: '🔍' },
@@ -2764,37 +2775,38 @@
       storedEntries: Object.keys(timeline).length
     });
     
-    // Initialize: Load IDB cache FIRST, then render, then queue remaining images
+    // Initialize: Render FIRST (so posts appear immediately), then load IDB cache in background
     pageLog("INIT_ASYNC_START", { timestamp: new Date().toISOString() });
+    
+    // Step 1: Render immediately with empty cache (images show placeholders)
+    pageLog("INITIAL_RENDER_START", { 
+      entries: Object.keys(timeline).length,
+      cachedImages: 0,
+      imageDownloadsPaused,
+      imageProcessingDeferred
+    });
+    try {
+      renderTimeline();
+      pageLog("INITIAL_RENDER_COMPLETE", { timestamp: new Date().toISOString() });
+    } catch (renderError) {
+      pageLog("INITIAL_RENDER_ERROR", { error: renderError.message, stack: renderError.stack?.slice(0, 300) });
+    }
+    setStatus("Loading image cache...");
+    
+    // Step 2: Load IDB cache in background, then apply to rendered images
     (async () => {
       pageLog("INIT_ASYNC_RUNNING", { timestamp: new Date().toISOString() });
       
-      // Step 1: Load IDB cache into memory
       let restored = 0;
       try {
         const stats = await getIDBCacheStats();
         pageLog("IDB_CACHE_STATS", { cachedImages: stats.count });
         
-        restored = await loadCachedImagesFromIDB();
-        pageLog("IDB_CACHE_LOADED", { restored, memoryCacheSize: Object.keys(getImagesCache()).length });
-      } catch (idbError) {
-        pageLog("IDB_INIT_ERROR", { error: idbError.message || String(idbError) });
-      }
-      
-      // Step 2: Now do initial render (with cached images in memory)
-      const cacheSize = Object.keys(getImagesCache()).length;
-      pageLog("INITIAL_RENDER_START", { 
-        entries: Object.keys(timeline).length,
-        cachedImages: cacheSize,
-        imageDownloadsPaused,
-        imageProcessingDeferred
-      });
-      renderTimeline();
-      pageLog("INITIAL_RENDER_COMPLETE", { timestamp: new Date().toISOString() });
-      
-      // Step 2.5: Apply any cached images that weren't rendered properly
-      if (cacheSize > 0) {
-        tab.window.setTimeout(() => {
+        if (stats.count > 0) {
+          restored = await loadCachedImagesFromIDB();
+          pageLog("IDB_CACHE_LOADED", { restored, memoryCacheSize: Object.keys(getImagesCache()).length });
+          
+          // Apply cached images to already-rendered elements
           const cache = getImagesCache();
           const loadingImages = listEl.querySelectorAll('img.post-image[src*="Loading"]');
           let applied = 0;
@@ -2809,12 +2821,13 @@
             pageLog("CACHE_POST_APPLY", { applied, totalLoading: loadingImages.length });
             triggerLayout();
           }
-        }, 500);
+        }
+      } catch (idbError) {
+        pageLog("IDB_INIT_ERROR", { error: idbError.message || String(idbError) });
       }
       
-      pageLog("INIT_SCHEDULING_QUEUE", { delayMs: 2000 });
-      // Queue all uncached images for background download (with delay)
-      // Use tab.window.setTimeout to ensure it runs in popup context
+      pageLog("INIT_SCHEDULING_QUEUE", { delayMs: 1000 });
+      // Queue all uncached images for background download (with shorter delay now)
       tab.window.setTimeout(() => {
         pageLog("INIT_QUEUE_TIMEOUT_FIRED", { timestamp: new Date().toISOString() });
         try {
@@ -2827,13 +2840,13 @@
           pageLog("BACKGROUND_QUEUE_ERROR", { error: queueError.message || String(queueError) });
           setStatus("Ready. (Background queue error)");
         }
-      }, 2000);
+      }, 1000);
     })();
 
     // ---------------------------------------------------------------
     // MASONRY LAYOUT ENGINE
     // ---------------------------------------------------------------
-    let layoutDebounceTimer = null;
+    var layoutDebounceTimer = null; // Use var to avoid TDZ issues in userscript context
 
     function triggerLayout() {
       if (layoutDebounceTimer) clearTimeout(layoutDebounceTimer);
@@ -2897,81 +2910,87 @@
     // v4.4.1: Enhanced error isolation and scope handling
     // ---------------------------------------------------------------
     
-    let imageObserver = null;
-    
-    // Store references to functions that will be called from observer
-    // This ensures proper scope binding even in async callbacks
-    const observerContext = {
-      getImagesCache: getImagesCache,
-      downloadImage: downloadImage,
-      pageLog: pageLog,
-      triggerLayout: triggerLayout,
-      IMAGE_PLACEHOLDER_DATA_URL: IMAGE_PLACEHOLDER_DATA_URL,
-      IMAGE_ERROR_DATA_URL: IMAGE_ERROR_DATA_URL
-    };
+    var imageObserver = null; // Use var to avoid temporal dead zone issues in userscript context
     
     function setupImageObserver() {
+      pageLog("IMAGE_OBSERVER_SETUP_ENTER", { hasExisting: !!imageObserver });
       if (imageObserver) return imageObserver;
       
       pageLog("IMAGE_OBSERVER_SETUP", { timestamp: new Date().toISOString() });
       
+      // Capture references directly (avoid closure scope issues in userscript context)
+      var localGetImagesCache = getImagesCache;
+      var localDownloadImage = downloadImage;
+      var localPageLog = pageLog;
+      var localTriggerLayout = triggerLayout;
+      var localPlaceholder = IMAGE_PLACEHOLDER_DATA_URL;
+      var localError = IMAGE_ERROR_DATA_URL;
+      
+      pageLog("IMAGE_OBSERVER_CONTEXT_CHECK", { 
+        hasGetImagesCache: typeof localGetImagesCache === 'function',
+        hasDownloadImage: typeof localDownloadImage === 'function',
+        hasPageLog: typeof localPageLog === 'function',
+        hasTriggerLayout: typeof localTriggerLayout === 'function',
+        hasIntersectionObserver: typeof IntersectionObserver !== 'undefined'
+      });
+      
       // Create observer with proper error isolation
-      imageObserver = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
+      imageObserver = new IntersectionObserver(function(entries) {
+        entries.forEach(function(entry) {
           // Wrap in try-catch for improved error isolation
           try {
             if (!entry.isIntersecting) return;
             
-            pageLog("IMAGE_OBSERVER_TRIGGERED", { 
-              key: entry.target.dataset?.imageKey,
+            localPageLog("IMAGE_OBSERVER_TRIGGERED", { 
+              key: entry.target.dataset ? entry.target.dataset.imageKey : null,
               isIntersecting: entry.isIntersecting,
               intersectionRatio: entry.intersectionRatio
             });
             
-            const img = entry.target;
-            const imageUrl = img.dataset.imageUrl;
-            const imageKey = img.dataset.imageKey;
+            var img = entry.target;
+            var imageUrl = img.dataset.imageUrl;
+            var imageKey = img.dataset.imageKey;
             
             if (!imageUrl || !imageKey) return;
             
             // Stop observing this image immediately
             imageObserver.unobserve(img);
             
-            // Check cache first using stored reference
-            const downloadedImages = observerContext.getImagesCache();
+            // Check cache first
+            var downloadedImages = localGetImagesCache();
             if (downloadedImages[imageKey]) {
               // Update lastAccessed for LRU tracking
               downloadedImages[imageKey].lastAccessed = Date.now();
               img.src = downloadedImages[imageKey].url;
-              observerContext.pageLog("IMAGE_CACHE_APPLIED", { key: imageKey, fromObserver: true });
+              localPageLog("IMAGE_CACHE_APPLIED", { key: imageKey, fromObserver: true });
               return;
             }
             
-            // Set up download timeout with proper reference
-            const downloadTimeout = setTimeout(() => {
-              if (img.src === observerContext.IMAGE_PLACEHOLDER_DATA_URL) {
-                img.src = observerContext.IMAGE_ERROR_DATA_URL;
-                observerContext.pageLog("IMAGE_RENDER_TIMEOUT", { key: imageKey });
+            // Set up download timeout
+            var downloadTimeout = setTimeout(function() {
+              if (img.src === localPlaceholder) {
+                img.src = localError;
+                localPageLog("IMAGE_RENDER_TIMEOUT", { key: imageKey });
               }
             }, 45000);
             
-            // Download the image using stored reference
-            observerContext.downloadImage(imageUrl, imageKey, observerContext.pageLog)
-              .then(record => {
+            // Download the image
+            localDownloadImage(imageUrl, imageKey, localPageLog)
+              .then(function(record) {
                 clearTimeout(downloadTimeout);
                 if (record && record.url) {
                   img.src = record.url;
-                  observerContext.pageLog("IMAGE_RENDER_APPLIED", { key: imageKey });
-                  observerContext.triggerLayout();
+                  localPageLog("IMAGE_RENDER_APPLIED", { key: imageKey });
+                  localTriggerLayout();
                 } else {
-                  img.src = observerContext.IMAGE_ERROR_DATA_URL;
-                  observerContext.pageLog("IMAGE_RENDER_FAILED", { key: imageKey, reason: "no_url" });
+                  img.src = localError;
+                  localPageLog("IMAGE_RENDER_FAILED", { key: imageKey, reason: "no_url" });
                 }
               })
-              .catch(err => {
+              .catch(function(err) {
                 clearTimeout(downloadTimeout);
-                img.src = observerContext.IMAGE_ERROR_DATA_URL;
-                observerContext.pageLog("IMAGE_RENDER_FAILED", { key: imageKey, error: err.message });
+                img.src = localError;
+                localPageLog("IMAGE_RENDER_FAILED", { key: imageKey, error: err.message });
               });
           } catch (observerError) {
             // Isolate errors to prevent one image failure from affecting others
@@ -2991,7 +3010,9 @@
     // ---------------------------------------------------------------
 
     function renderTimeline() {
+      pageLog("RENDER_STEP_1", { action: "getting_entries" });
       const entries = Object.values(timeline);
+      pageLog("RENDER_STEP_2", { entriesCount: entries.length });
 
       if (!entries.length) {
         listEl.innerHTML = "";
@@ -3000,9 +3021,11 @@
         empty.textContent =
           "No posts in your local archive yet. Keep this tab open and it will slowly fill up.";
         listEl.appendChild(empty);
+        pageLog("RENDER_STEP_EMPTY", { reason: "no_entries" });
         return;
       }
 
+      pageLog("RENDER_STEP_3", { action: "sorting" });
       // Sort by actual post creation time (FIXED), with "Bump" for late discoveries
       entries.sort((a, b) => {
         const timeA = a.created_ts || parseWeiboTime(a.createdAt);
@@ -3015,10 +3038,12 @@
         
         return effectiveTimeB - effectiveTimeA;
       });
+      pageLog("RENDER_STEP_4", { action: "sorted" });
       
       // Show/hide footer based on whether there are more items to load
       const footer = doc.getElementById('footer');
       const loadMoreBtn = doc.getElementById('load-more-btn');
+      pageLog("RENDER_STEP_5", { footer: !!footer, loadMoreBtn: !!loadMoreBtn });
       if (footer && loadMoreBtn) {
         if (entries.length > currentRenderCount) {
           const hiddenCount = entries.length - currentRenderCount;
@@ -3029,14 +3054,30 @@
         }
       }
 
+      pageLog("RENDER_STEP_6", { action: "slicing", currentRenderCount });
       const limited = entries.slice(0, currentRenderCount);
+      pageLog("RENDER_STEP_7", { limitedCount: limited.length });
       const downloadedImages = getImagesCache();
-      const observer = setupImageObserver();
+      pageLog("RENDER_STEP_8", { cachedImages: Object.keys(downloadedImages).length });
+      let observer = null;
+      try {
+        pageLog("RENDER_STEP_8a", { action: "calling_setupImageObserver" });
+        observer = setupImageObserver();
+        pageLog("RENDER_STEP_9", { observerReady: !!observer });
+      } catch (observerError) {
+        pageLog("RENDER_OBSERVER_ERROR", { error: observerError.message, stack: observerError.stack?.slice(0, 200) });
+        // Continue without observer - images will use placeholders
+      }
       let observedImageCount = 0;
       let cachedImageCount = 0;
 
+      pageLog("RENDER_STEP_10", { action: "clearing_list" });
       listEl.innerHTML = "";
-      limited.forEach(entry => {
+      pageLog("RENDER_STEP_11", { action: "starting_loop", itemCount: limited.length });
+      
+      let renderedCount = 0;
+      limited.forEach((entry, idx) => {
+        try {
         const item = doc.createElement("div");
         item.className = "item";
 
@@ -3111,8 +3152,10 @@
             } else {
               // Use placeholder and let IntersectionObserver handle download
               img.src = IMAGE_PLACEHOLDER_DATA_URL;
-              observer.observe(img);
-              observedImageCount++;
+              if (observer) {
+                observer.observe(img);
+                observedImageCount++;
+              }
             }
 
             img.onclick = () => {
@@ -3150,7 +3193,13 @@
         item.appendChild(actions);
 
         listEl.appendChild(item);
+        renderedCount++;
+        } catch (itemError) {
+          pageLog("RENDER_ITEM_ERROR", { index: idx, error: itemError.message, entryKey: entry?.key });
+        }
       });
+      
+      pageLog("RENDER_STEP_12", { action: "loop_complete", renderedCount });
       
       // Log image stats for debugging
       pageLog("RENDER_IMAGE_STATS", {
@@ -3161,7 +3210,12 @@
       });
       
       // Run initial layout after DOM insertion
-      triggerLayout();
+      try {
+        triggerLayout();
+        pageLog("RENDER_LAYOUT_COMPLETE", { action: "layout_triggered" });
+      } catch (layoutError) {
+        pageLog("RENDER_LAYOUT_ERROR", { error: layoutError.message });
+      }
       
       // Note: Manual image trigger removed - background queue handles all images now
     }
