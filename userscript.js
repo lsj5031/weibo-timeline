@@ -177,7 +177,7 @@
   const PENDING_DOWNLOAD_TIMEOUT_MS = 45000; // 45 seconds timeout for stuck pending downloads
   const FAILED_IMAGE_RETRY_COOLDOWN = 300000; // 5 minutes before retrying failed images
   const IMAGE_CACHE_VALIDITY_MS = 7 * 24 * 3600000; // 7 days cache validity (persistent)
-  const IMAGE_CACHE_SOFT_LIMIT = 2000; // Increased limit for persistent cache
+  const IMAGE_CACHE_SOFT_LIMIT = 8000; // High limit to avoid re-downloading from IDB
   
   // -------------------------------------------------------------------
   // INDEXEDDB PERSISTENT IMAGE CACHE
@@ -276,21 +276,29 @@
   
   async function loadAllImagesFromIDB() {
     try {
+      console.log('[WeiboTimeline] loadAllImagesFromIDB: opening DB...');
       const db = await openImageDB();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction(IDB_STORE, 'readonly');
-        const store = tx.objectStore(IDB_STORE);
-        const request = store.getAll();
+      console.log('[WeiboTimeline] loadAllImagesFromIDB: DB opened, creating transaction...');
+      return new Promise(function(resolve, reject) {
+        var tx = db.transaction(IDB_STORE, 'readonly');
+        var store = tx.objectStore(IDB_STORE);
+        console.log('[WeiboTimeline] loadAllImagesFromIDB: calling getAll...');
+        var request = store.getAll();
         
-        request.onsuccess = () => {
-          const records = request.result || [];
-          const validRecords = records.filter(r => {
-            const age = Date.now() - r.downloadedAt;
+        request.onsuccess = function() {
+          console.log('[WeiboTimeline] loadAllImagesFromIDB: getAll success, records:', request.result ? request.result.length : 0);
+          var records = request.result || [];
+          var validRecords = records.filter(function(r) {
+            var age = Date.now() - r.downloadedAt;
             return age < IMAGE_CACHE_VALIDITY_MS;
           });
+          console.log('[WeiboTimeline] loadAllImagesFromIDB: valid records:', validRecords.length);
           resolve(validRecords);
         };
-        request.onerror = () => reject(request.error);
+        request.onerror = function() {
+          console.error('[WeiboTimeline] loadAllImagesFromIDB: getAll error:', request.error);
+          reject(request.error);
+        };
       });
     } catch (e) {
       console.error('[WeiboTimeline] loadAllImagesFromIDB error:', e);
@@ -2631,7 +2639,9 @@
     // Load cached images from IndexedDB into memory
     async function loadCachedImagesFromIDB() {
       try {
+        pageLog("IDB_LOADING_START", { timestamp: new Date().toISOString() });
         const records = await loadAllImagesFromIDB();
+        pageLog("IDB_RECORDS_LOADED", { count: records ? records.length : 0 });
         const cache = getImagesCache();
         let restored = 0;
         
@@ -2738,9 +2748,9 @@
         }
       }
       
-      const drip = tab.window.setInterval(() => {
+      var drip = setInterval(function() {
         if (index >= imagesToQueue.length) {
-          tab.window.clearInterval(drip);
+          clearInterval(drip);
           queueingDone = true;
           pageLog("BACKGROUND_QUEUE_DRIP_DONE", { 
             queued: index,
@@ -2765,7 +2775,7 @@
             updateBackgroundStatus();
             checkAllComplete();
           });
-      }, 50); // Add one image to queue every 50ms (20/sec)
+      }, 200); // Add one image to queue every 200ms (5/sec) - less aggressive to avoid rate limits
       
       return imagesToQueue.length;
     }
@@ -2827,20 +2837,33 @@
       }
       
       pageLog("INIT_SCHEDULING_QUEUE", { delayMs: 1000 });
+      
+      // Store references to avoid scope issues
+      var localPageLog = pageLog;
+      var localQueueFn = queueAllImagesForBackground;
+      var localSetStatus = setStatus;
+      
       // Queue all uncached images for background download (with shorter delay now)
-      tab.window.setTimeout(() => {
-        pageLog("INIT_QUEUE_TIMEOUT_FIRED", { timestamp: new Date().toISOString() });
-        try {
-          const queued = queueAllImagesForBackground();
-          pageLog("BACKGROUND_QUEUE_INITIATED", { queued });
-          if (queued === 0) {
-            setStatus("Ready. All images cached.");
+      try {
+        var timeoutId = window.setTimeout(function backgroundQueueTimer() {
+          try {
+            console.log('[WeiboTimeline] backgroundQueueTimer fired!');
+            localPageLog("INIT_QUEUE_TIMEOUT_FIRED", { timestamp: new Date().toISOString() });
+            var queued = localQueueFn();
+            localPageLog("BACKGROUND_QUEUE_INITIATED", { queued: queued });
+            if (queued === 0) {
+              localSetStatus("Ready. All images cached.");
+            }
+          } catch (queueError) {
+            console.error('[WeiboTimeline] backgroundQueueTimer error:', queueError);
+            localPageLog("BACKGROUND_QUEUE_ERROR", { error: queueError.message || String(queueError) });
+            localSetStatus("Ready. (Background queue error)");
           }
-        } catch (queueError) {
-          pageLog("BACKGROUND_QUEUE_ERROR", { error: queueError.message || String(queueError) });
-          setStatus("Ready. (Background queue error)");
-        }
-      }, 1000);
+        }, 1000);
+        pageLog("INIT_TIMEOUT_REGISTERED", { timeoutId: timeoutId });
+      } catch (timeoutError) {
+        pageLog("INIT_TIMEOUT_ERROR", { error: timeoutError.message });
+      }
     })();
 
     // ---------------------------------------------------------------
