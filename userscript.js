@@ -251,8 +251,21 @@
   }
 
   function resumeImageDownloads() {
-    if (!imageDownloadsPaused) return;
+    if (!imageDownloadsPaused) {
+      console.log("[WeiboTimeline] RESUME_DOWNLOADS_NOOP", {
+        paused: imageDownloadsPaused,
+        active: activeImageDownloads,
+        queue: imageDownloadQueue.length
+      });
+      return;
+    }
     imageDownloadsPaused = false;
+    console.log("[WeiboTimeline] IMAGE_DOWNLOADS_RESUMED_PROCESSING", {
+      paused: imageDownloadsPaused,
+      active: activeImageDownloads,
+      queueLength: imageDownloadQueue.length,
+      pendingDownloads: pendingImageDownloads.size
+    });
     processImageDownloadQueue();
   }
 
@@ -424,14 +437,34 @@
 
   function processImageDownloadQueue() {
     if (imageDownloadsPaused) {
+      console.log("[WeiboTimeline] PROCESS_QUEUE_PAUSED", {
+        paused: imageDownloadsPaused,
+        active: activeImageDownloads,
+        queue: imageDownloadQueue.length
+      });
       return;
     }
+
+    const canProcess = activeImageDownloads < IMAGE_DOWNLOAD_CONCURRENCY && imageDownloadQueue.length > 0;
+    if (canProcess) {
+      console.log("[WeiboTimeline] PROCESS_QUEUE_PROCESSING", {
+        active: activeImageDownloads,
+        concurrency: IMAGE_DOWNLOAD_CONCURRENCY,
+        queue: imageDownloadQueue.length
+      });
+    }
+
     while (
       activeImageDownloads < IMAGE_DOWNLOAD_CONCURRENCY &&
       imageDownloadQueue.length > 0
     ) {
       const task = imageDownloadQueue.shift();
       if (task) {
+        console.log("[WeiboTimeline] DEQUEUING_TASK", {
+          key: task.key,
+          queueRemaining: imageDownloadQueue.length,
+          active: activeImageDownloads
+        });
         startImageDownload(task);
       }
     }
@@ -462,7 +495,10 @@
     let requestHandle = null;
     
     const finalize = (success = true) => {
-      if (completed) return;
+      if (completed) {
+        console.log("[WeiboTimeline] FINALIZE_ALREADY_COMPLETED", { key, attempt });
+        return;
+      }
       completed = true;
       if (failsafeHandle) clearTimeout(failsafeHandle);
       if (requestHandle && requestHandle.abort) {
@@ -470,12 +506,20 @@
           requestHandle.abort();
         } catch (e) {}
       }
-      
+
       const duration = Date.now() - startTime;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
+      console.log("[WeiboTimeline] IMAGE_FINALIZED", {
+        key,
+        attempt,
+        success,
+        duration,
+        activeAfter: activeImageDownloads,
+        queueLength: imageDownloadQueue.length
+      });
       if (logger && success) {
-        logger("IMAGE_DOWNLOAD_SUCCESS", { 
-          key, 
+        logger("IMAGE_DOWNLOAD_SUCCESS", {
+          key,
           attempt,
           duration,
           active: activeImageDownloads,
@@ -964,34 +1008,49 @@
   // -------------------------------------------------------------------
 
   function fetchWeiboApi(params, uid, logLabel, log) {
-    const qs = new URLSearchParams(params).toString();
-    const url = API_BASE + "?" + qs;
+     const qs = new URLSearchParams(params).toString();
+     const url = API_BASE + "?" + qs;
 
-    return new Promise((resolve, reject) => {
-      const requestStartTime = Date.now();
-      log("REQUEST", { uid, logLabel, url, params: Object.fromEntries(Object.entries(params)) });
+     return new Promise((resolve, reject) => {
+       const requestStartTime = Date.now();
+       log("REQUEST", { uid, logLabel, url, params: Object.fromEntries(Object.entries(params)) });
+       log("REQUEST_DETAILED", {
+         uid,
+         logLabel,
+         startTime: new Date().toISOString(),
+         containerid: params.containerid,
+         networkDiagnostics: getNetworkDiagnostics()
+       });
 
-      let completed = false;
-      let timeoutHandle = null;
+       let completed = false;
+       let timeoutHandle = null;
+       let requestHandle = null;
 
-      const finalize = (type, response) => {
-        if (completed) return;
-        completed = true;
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-        
-        const duration = Date.now() - requestStartTime;
+       const finalize = (type, response) => {
+         if (completed) return;
+         completed = true;
+         if (timeoutHandle) clearTimeout(timeoutHandle);
+         if (requestHandle && requestHandle.abort) {
+           try {
+             requestHandle.abort();
+           } catch (e) {
+             log("REQUEST_ABORT_FAILED", { uid, error: e.message });
+           }
+         }
 
-        if (type === "TIMEOUT" || type === "FAILSAFE") {
-            log("TIMEOUT_ERROR", { uid, type, duration, timeoutMs: 25000 });
-            reject(new Error("Request timed out"));
-            return;
-        }
+         const duration = Date.now() - requestStartTime;
 
-        if (type === "ERROR") {
-            log("NETWORK_ERROR", { uid, error: String(response), duration });
-            reject(new Error("Network Error"));
-            return;
-        }
+         if (type === "TIMEOUT" || type === "FAILSAFE") {
+             log("TIMEOUT_ERROR", { uid, type, duration, timeoutMs: 25000 });
+             reject(new Error("Request timed out"));
+             return;
+         }
+
+         if (type === "ERROR") {
+             log("NETWORK_ERROR", { uid, error: String(response), duration });
+             reject(new Error("Network Error"));
+             return;
+         }
 
         // Success handling
         log("RESPONSE_RECEIVED", {
@@ -1034,16 +1093,23 @@
       timeoutHandle = setTimeout(() => {
         if (!completed) {
           log("HARD_TIMEOUT_ABORT", { uid, reason: "no response after 25s", duration: Date.now() - requestStartTime });
+          if (requestHandle && requestHandle.abort) {
+            try {
+              requestHandle.abort();
+            } catch (e) {
+              log("HARD_TIMEOUT_ABORT_FAILED", { uid, error: e.message });
+            }
+          }
           finalize("FAILSAFE", null);
         }
       }, 25000);
 
       try {
-        gmRequest({
+        requestHandle = gmRequest({
           method: "GET",
           url: url,
           // 2. GM Timeout (Network side) - increased to 20s
-          timeout: 20000, 
+          timeout: 20000,
           // 3. Crucial Headers for Weibo
           headers: {
            "X-Requested-With": "XMLHttpRequest",
@@ -1056,14 +1122,20 @@
            "Sec-Fetch-Site": "same-origin"
           },
           // 4. Ensure cookies are sent
-          anonymous: false, 
+          anonymous: false,
           onload: (resp) => finalize("LOAD", resp),
           onerror: (resp) => finalize("ERROR", resp),
           ontimeout: (resp) => finalize("TIMEOUT", resp)
         });
 
-        log("REQUEST_INITIATED", { uid, logLabel, hasHandle: true });
+        log("REQUEST_INITIATED", {
+          uid,
+          logLabel,
+          hasHandle: !!requestHandle,
+          duration: Date.now() - requestStartTime
+        });
       } catch (error) {
+        log("REQUEST_INIT_ERROR", { uid, error: error.message });
         finalize("ERROR", error.message);
       }
     });
@@ -2626,9 +2698,10 @@
         return;
       }
 
+      const refreshStartTime = Date.now();
       manualRefreshInProgress = true;
       deferRenderingDuringRefresh = true;
-      
+
       // Defer image processing during main API calls to prevent blocking
       deferImageProcessing(true);
       pauseImageDownloads();
@@ -2671,52 +2744,103 @@
         let timeoutCount = 0;
 
         try {
+          pageLog("REFRESH_LOOP_STARTING", {
+            startIndex,
+            endIndex: currentUsers.length,
+            totalToProcess: currentUsers.length - startIndex,
+            totalUids: currentUsers.length
+          });
+
           for (let i = startIndex; i < currentUsers.length; i++) {
             const uid = currentUsers[i];
-            
+            console.log(`[WeiboTimeline] Loop iteration ${i + 1}/${currentUsers.length} for UID ${uid}`);
+
             // Frequency-based skipping logic
             const health = getUidHealth(uid);
             const checkInterval = health.checkInterval || 1;
             let skippedChecks = health.skippedChecks || 0;
-            
+
             if (skippedChecks < checkInterval - 1) {
               skippedChecks++;
               updateUidSkippedChecks(uid, skippedChecks);
-              pageLog("SKIP_UID", { 
-                uid, 
-                reason: "low_frequency", 
-                label: health.frequencyLabel, 
-                skipped: skippedChecks, 
-                interval: checkInterval 
+              pageLog("SKIP_UID", {
+                uid,
+                reason: "low_frequency",
+                label: health.frequencyLabel,
+                skipped: skippedChecks,
+                interval: checkInterval
               });
-              
+
               // Minimal delay when skipping to keep UI responsive
               if (i < currentUsers.length - 1) {
-                 await sleep(50); 
+                 await sleep(50);
               }
-              continue; 
+              continue;
             }
 
             const progress = Math.round(((i + 1) / currentUsers.length) * 100);
             setStatus(`Fetching account ${i + 1}/${currentUsers.length} (${progress}%)…`);
 
+            // Debug state before processing UID
+            pageLog("PROCESS_UID_STARTING", {
+              uid,
+              index: i + 1,
+              totalAccounts: currentUsers.length,
+              progress: progress + "%",
+              queueState: {
+                activeImageDownloads,
+                queueLength: imageDownloadQueue.length,
+                pendingDownloads: pendingImageDownloads.size,
+                paused: imageDownloadsPaused,
+                deferred: imageProcessingDeferred
+              },
+              health: {
+                status: health.status,
+                frequencyLabel: health.frequencyLabel,
+                checkInterval
+              }
+            });
+
             try {
               await processOneUidWithTimeout(uid, 40000); // 40s hard timeout per UID
               successCount++;
+              pageLog("PROCESS_UID_SUCCESS", {
+                uid,
+                index: i + 1,
+                successCount,
+                queueState: {
+                  activeImageDownloads,
+                  queueLength: imageDownloadQueue.length,
+                  pendingDownloads: pendingImageDownloads.size
+                }
+              });
             } catch (err) {
               if (err && err.isHardTimeout) {
                 timeoutCount++;
                 pageLog("PROCESS_HARD_TIMEOUT", {
                   uid,
+                  index: i + 1,
                   message: "UID processing exceeded 40s timeout, continuing to next UID",
-                  error: err.message
+                  error: err.message,
+                  queueState: {
+                    activeImageDownloads,
+                    queueLength: imageDownloadQueue.length,
+                    pendingDownloads: pendingImageDownloads.size
+                  }
                 });
                 updateUidHealth(uid, HEALTH_STALLED);
               } else {
                 failureCount++;
                 pageLog("PROCESS_FATAL", {
                   uid,
-                  error: err && err.message ? err.message : String(err)
+                  index: i + 1,
+                  error: err && err.message ? err.message : String(err),
+                  errorType: err?.name || "unknown",
+                  queueState: {
+                    activeImageDownloads,
+                    queueLength: imageDownloadQueue.length,
+                    pendingDownloads: pendingImageDownloads.size
+                  }
                 });
               }
             }
@@ -2725,10 +2849,29 @@
               // Add random jitter (0-2s) to avoid pattern detection
               const jitter = Math.random() * 2000;
               const totalWait = BETWEEN_ACCOUNTS_MS + jitter;
-              pageLog("SleepBetweenAccounts", { uid, ms: Math.round(totalWait), jitter: Math.round(jitter) });
+              pageLog("SleepBetweenAccounts", {
+                uid,
+                nextUid: currentUsers[i + 1],
+                ms: Math.round(totalWait),
+                jitter: Math.round(jitter),
+                queueState: {
+                  activeImageDownloads,
+                  queueLength: imageDownloadQueue.length,
+                  pendingDownloads: pendingImageDownloads.size
+                }
+              });
               try {
                 await sleep(Math.round(totalWait));
-                pageLog("AfterSleepBetweenAccounts", { uid });
+                pageLog("AfterSleepBetweenAccounts", {
+                  uid,
+                  nextIndex: i + 2,
+                  nextUid: currentUsers[i + 1],
+                  queueState: {
+                    activeImageDownloads,
+                    queueLength: imageDownloadQueue.length,
+                    pendingDownloads: pendingImageDownloads.size
+                  }
+                });
               } catch (e) {
                 pageLog("SleepError", {
                   uid,
@@ -2751,28 +2894,82 @@
             failed: failureCount,
             timedOut: timeoutCount
           });
-        } finally {
-          manualRefreshInProgress = false;
-          deferRenderingDuringRefresh = false;
-          
-          // Render once after all updates
-          renderTimeline();
-          updateUidStatus();
-          pageLog("TIMELINE_RENDERED", { reason: "batch_refresh_complete" });
-          
-          // Lift image processing deferral first, then resume downloads
-          deferImageProcessing(false);
-          pageLog("IMAGE_PROCESSING_RESUMED", { reason: "main_process_complete" });
-          
-          resumeImageDownloads();
-          pageLog("IMAGE_DOWNLOADS_RESUMED", { reason: "manual_refresh_complete" });
+          } catch (outerError) {
+          pageLog("REFRESH_OUTER_ERROR", {
+            error: outerError && outerError.message ? outerError.message : String(outerError),
+            errorType: outerError?.name || "unknown",
+            stack: outerError?.stack?.split('\n').slice(0, 5).join(' | '),
+            successCount,
+            failureCount,
+            timeoutCount
+          });
+          console.error("[WeiboTimeline] REFRESH_OUTER_ERROR:", outerError);
+          } finally {
+           pageLog("MANUAL_REFRESH_FINALLY_BLOCK", {
+             successCount,
+             failureCount,
+             timeoutCount,
+             totalProcessed: successCount + failureCount + timeoutCount,
+             totalUids: currentUsers.length,
+             queueState: {
+               activeImageDownloads,
+               queueLength: imageDownloadQueue.length,
+               pendingDownloads: pendingImageDownloads.size
+             },
+             flags: {
+               deferRenderingDuringRefresh,
+               imageDownloadsPaused,
+               imageProcessingDeferred
+             }
+           });
 
-          // Re-enable refresh button
-          if (refreshBtn) {
-            refreshBtn.disabled = false;
-            refreshBtn.textContent = '🔄 Refresh All';
-          }
-        }
+           manualRefreshInProgress = false;
+           deferRenderingDuringRefresh = false;
+
+           pageLog("FLAGS_RESET", {
+             manualRefreshInProgress,
+             deferRenderingDuringRefresh
+           });
+
+           // Render once after all updates
+           pageLog("RENDERING_TIMELINE", { reason: "batch_refresh_complete" });
+           renderTimeline();
+           updateUidStatus();
+           pageLog("TIMELINE_RENDERED", { reason: "batch_refresh_complete" });
+
+           // Lift image processing deferral first, then resume downloads
+           pageLog("DEFERRAL_BEING_LIFTED", { deferred: imageProcessingDeferred });
+           deferImageProcessing(false);
+           pageLog("IMAGE_PROCESSING_RESUMED", { reason: "main_process_complete", deferred: imageProcessingDeferred });
+
+           pageLog("RESUMING_DOWNLOADS", {
+             paused: imageDownloadsPaused,
+             activeDownloads: activeImageDownloads,
+             queueLength: imageDownloadQueue.length
+           });
+           resumeImageDownloads();
+           pageLog("IMAGE_DOWNLOADS_RESUMED", {
+             reason: "manual_refresh_complete",
+             paused: imageDownloadsPaused,
+             queueLength: imageDownloadQueue.length,
+             activeDownloads: activeImageDownloads
+           });
+
+           // Re-enable refresh button
+           if (refreshBtn) {
+             refreshBtn.disabled = false;
+             refreshBtn.textContent = '🔄 Refresh All';
+           }
+
+           pageLog("MANUAL_REFRESH_FULLY_COMPLETE", {
+             duration: Date.now() - refreshStartTime,
+             summary: {
+               successCount,
+               failureCount,
+               timeoutCount
+             }
+           });
+         }
       })();
     }
 
@@ -3003,28 +3200,62 @@
     // ---------------------------------------------------------------
 
     async function processOneUid(uid) {
-      pageLog("PROCESS_START", { uid });
+       pageLog("PROCESS_START", { uid });
+       pageLog("PROCESS_START_DETAILED", {
+         uid,
+         timestamp: new Date().toISOString(),
+         queueState: {
+           activeImageDownloads,
+           queueLength: imageDownloadQueue.length,
+           pendingDownloads: pendingImageDownloads.size
+         },
+         flags: {
+           deferRenderingDuringRefresh,
+           imageDownloadsPaused,
+           imageProcessingDeferred
+         }
+       });
 
-      try {
-        // Retry wrapper for ghost response hangs
-        let json;
-        let retryCount = 0;
-        const MAX_RETRIES = 2;
-        
-        while (retryCount <= MAX_RETRIES) {
-          try {
-            json = await fetchUserPosts(uid, pageLog, retryCount);
-            break; // Success
-          } catch (err) {
-            if ((err.message.includes("timeout") || err.message.includes("Ghost")) && retryCount < MAX_RETRIES) {
-              pageLog("RETRY_ON_HANG", { uid, attempt: retryCount + 1, reason: err.message });
-              await sleep(5000);  // 5s extra wait before retry
-              retryCount++;
-              continue;
-            }
-            throw err; // Re-throw if not a timeout or max retries exceeded
-          }
-        }
+       try {
+         // Retry wrapper for ghost response hangs
+         let json;
+         let retryCount = 0;
+         const MAX_RETRIES = 2;
+
+         while (retryCount <= MAX_RETRIES) {
+           try {
+             pageLog("FETCH_USER_POSTS_STARTING", {
+               uid,
+               retryAttempt: retryCount + 1,
+               maxRetries: MAX_RETRIES
+             });
+             json = await fetchUserPosts(uid, pageLog, retryCount);
+             pageLog("FETCH_USER_POSTS_COMPLETE", {
+               uid,
+               retryAttempt: retryCount + 1,
+               success: true,
+               hasJson: !!json,
+               ok: json?.ok,
+               cardsCount: json?.data?.cards?.length || 0
+             });
+             break; // Success
+           } catch (err) {
+             pageLog("FETCH_USER_POSTS_ERROR", {
+               uid,
+               retryAttempt: retryCount + 1,
+               error: err && err.message ? err.message : String(err),
+               isTimeout: err?.message?.includes("timeout"),
+               isGhost: err?.message?.includes("Ghost")
+             });
+             if ((err.message.includes("timeout") || err.message.includes("Ghost")) && retryCount < MAX_RETRIES) {
+               pageLog("RETRY_ON_HANG", { uid, attempt: retryCount + 1, reason: err.message });
+               await sleep(5000);  // 5s extra wait before retry
+               retryCount++;
+               continue;
+             }
+             throw err; // Re-throw if not a timeout or max retries exceeded
+           }
+         }
 
         if (!json || json.ok !== 1 || !json.data || !Array.isArray(json.data.cards)) {
           pageLog("API_NOT_OK", { uid, ok: json && json.ok });
@@ -3157,15 +3388,35 @@
 
         // Save this UID as the last successfully processed
         saveLastUid(uid);
-        
-      } catch (err) {
+        pageLog("PROCESS_UID_COMPLETED", {
+          uid,
+          reason: "successful_completion",
+          queueState: {
+            activeImageDownloads,
+            queueLength: imageDownloadQueue.length,
+            pendingDownloads: pendingImageDownloads.size
+          }
+        });
+
+        } catch (err) {
         pageLog("PROCESS_FAILED", {
           uid,
-          error: err && err.message ? err.message : String(err)
+          error: err && err.message ? err.message : String(err),
+          errorType: err?.name || "unknown"
         });
         updateUidHealth(uid, HEALTH_INVALID);
-      }
-    }
+        pageLog("PROCESS_UID_COMPLETED", {
+          uid,
+          reason: "error_completion",
+          error: err && err.message ? err.message : String(err),
+          queueState: {
+            activeImageDownloads,
+            queueLength: imageDownloadQueue.length,
+            pendingDownloads: pendingImageDownloads.size
+          }
+        });
+        }
+        }
 
     // ---------------------------------------------------------------
     // MANUAL REFRESH ONLY (AUTO-REFRESH DISABLED)
