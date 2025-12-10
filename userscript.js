@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.4.2)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.4.3)
 // @namespace    http://tampermonkey.net/
-// @version      4.4.2
-// @description  Enhanced Weibo timeline: v4.4.2 fixes network diagnostic failure on weibo.com by using GM_xmlhttpRequest. v4.4.1 fixes image loading in popup (self-contained data URL dashboard), resolves scope issues with lazy loading/observer, unblocks manual refresh hangs via improved error isolation and popup injection. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
+// @version      4.4.3
+// @description  Enhanced Weibo timeline: v4.4.3 adds pre-flight checks for GM API health and Weibo login status before refresh to diagnose silent request failures. v4.4.2 fixes network diagnostic failure on weibo.com by using GM_xmlhttpRequest. v4.4.1 fixes image loading in popup (self-contained data URL dashboard), resolves scope issues with lazy loading/observer, unblocks manual refresh hangs via improved error isolation and popup injection. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -890,6 +890,99 @@
 
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Pre-flight check: Verify GM_xmlhttpRequest is functioning
+  async function testGMApiHealth(logger = null) {
+    return new Promise((resolve) => {
+      const startTime = Date.now();
+      const timeout = setTimeout(() => {
+        if (logger) logger("GM_API_HEALTH_TIMEOUT", { duration: Date.now() - startTime });
+        resolve({ working: false, reason: "timeout", duration: Date.now() - startTime });
+      }, 5000);
+      
+      try {
+        gmRequest({
+          method: "HEAD",
+          url: "https://m.weibo.cn/",
+          timeout: 4000,
+          onload: (response) => {
+            clearTimeout(timeout);
+            const duration = Date.now() - startTime;
+            if (logger) logger("GM_API_HEALTH_SUCCESS", { status: response.status, duration });
+            resolve({ working: true, status: response.status, duration });
+          },
+          onerror: (error) => {
+            clearTimeout(timeout);
+            const duration = Date.now() - startTime;
+            if (logger) logger("GM_API_HEALTH_ERROR", { error: String(error), duration });
+            resolve({ working: false, reason: "network_error", duration });
+          },
+          ontimeout: () => {
+            clearTimeout(timeout);
+            const duration = Date.now() - startTime;
+            if (logger) logger("GM_API_HEALTH_TIMEOUT", { reason: "gm_timeout", duration });
+            resolve({ working: false, reason: "gm_timeout", duration });
+          }
+        });
+      } catch (e) {
+        clearTimeout(timeout);
+        if (logger) logger("GM_API_HEALTH_EXCEPTION", { error: e.message });
+        resolve({ working: false, reason: e.message, duration: Date.now() - startTime });
+      }
+    });
+  }
+
+  // Check if user is logged into Weibo
+  async function checkWeiboLogin(logger = null) {
+    return new Promise((resolve) => {
+      const startTime = Date.now();
+      const timeout = setTimeout(() => {
+        if (logger) logger("WEIBO_LOGIN_CHECK_TIMEOUT", { duration: Date.now() - startTime });
+        resolve({ loggedIn: false, reason: "timeout" });
+      }, 8000);
+      
+      try {
+        gmRequest({
+          method: "GET",
+          url: "https://m.weibo.cn/api/config",
+          timeout: 7000,
+          headers: {
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest"
+          },
+          anonymous: false,
+          onload: (response) => {
+            clearTimeout(timeout);
+            const duration = Date.now() - startTime;
+            try {
+              const data = JSON.parse(response.responseText);
+              const isLoggedIn = data.data && data.data.login === true;
+              const uid = data.data?.uid || null;
+              if (logger) logger("WEIBO_LOGIN_CHECK_RESULT", { loggedIn: isLoggedIn, uid, duration });
+              resolve({ loggedIn: isLoggedIn, uid, duration });
+            } catch (e) {
+              if (logger) logger("WEIBO_LOGIN_CHECK_PARSE_ERROR", { error: e.message, duration });
+              resolve({ loggedIn: false, reason: "parse_error", duration });
+            }
+          },
+          onerror: (error) => {
+            clearTimeout(timeout);
+            if (logger) logger("WEIBO_LOGIN_CHECK_ERROR", { error: String(error) });
+            resolve({ loggedIn: false, reason: "network_error" });
+          },
+          ontimeout: () => {
+            clearTimeout(timeout);
+            if (logger) logger("WEIBO_LOGIN_CHECK_TIMEOUT", { reason: "gm_timeout" });
+            resolve({ loggedIn: false, reason: "gm_timeout" });
+          }
+        });
+      } catch (e) {
+        clearTimeout(timeout);
+        if (logger) logger("WEIBO_LOGIN_CHECK_EXCEPTION", { error: e.message });
+        resolve({ loggedIn: false, reason: e.message });
+      }
+    });
   }
 
   function truncate(str, max) {
@@ -2117,6 +2210,24 @@
         'IMAGE_FAILURE_PATTERN_DETECTED': { type: 'warning', icon: '📊' },
         'NETWORK_DIAGNOSTICS_COMPLETE': { type: 'success', icon: '🌐' },
         'NETWORK_DIAGNOSTICS_ERROR': { type: 'error', icon: '🌐' },
+        'GM_API_HEALTH_SUCCESS': { type: 'success', icon: '✓' },
+        'GM_API_HEALTH_ERROR': { type: 'error', icon: '✕' },
+        'GM_API_HEALTH_TIMEOUT': { type: 'error', icon: '⧖' },
+        'GM_API_HEALTH_EXCEPTION': { type: 'error', icon: '✕' },
+        'WEIBO_LOGIN_CHECK_RESULT': { type: 'info', icon: '🔐' },
+        'WEIBO_LOGIN_CHECK_ERROR': { type: 'error', icon: '🔐' },
+        'WEIBO_LOGIN_CHECK_TIMEOUT': { type: 'warning', icon: '⧖' },
+        'WEIBO_LOGIN_CHECK_PARSE_ERROR': { type: 'warning', icon: '⚠' },
+        'WEIBO_LOGIN_CHECK_EXCEPTION': { type: 'error', icon: '✕' },
+        'PREFLIGHT_CHECK_START': { type: 'info', icon: '🔍' },
+        'PREFLIGHT_CHECK_COMPLETE': { type: 'success', icon: '✓' },
+        'PREFLIGHT_CHECK_FAILED': { type: 'error', icon: '✕' },
+        'IMAGE_OBSERVER_SETUP': { type: 'debug', icon: '👁' },
+        'IMAGE_OBSERVER_TRIGGERED': { type: 'debug', icon: '👁' },
+        'INITIAL_RENDER_START': { type: 'info', icon: '🎨' },
+        'INITIAL_RENDER_COMPLETE': { type: 'success', icon: '✓' },
+        'RENDER_IMAGE_STATS': { type: 'info', icon: '📊' },
+        'MANUAL_IMAGE_TRIGGER': { type: 'info', icon: '🖼' },
         'CONTAINER_ATTEMPT': { type: 'debug', icon: '→' },
         'CONTAINER_SUCCESS': { type: 'success', icon: '✓' },
         'CONTAINER_EMPTY': { type: 'warning', icon: '∅' },
@@ -2368,6 +2479,41 @@
 
     // Attach resize listener to the popup window
     tab.window.addEventListener('resize', triggerLayout);
+    
+    // WORKAROUND: Add scroll listener as fallback for IntersectionObserver
+    let scrollDebounce = null;
+    tab.window.addEventListener('scroll', () => {
+      if (scrollDebounce) clearTimeout(scrollDebounce);
+      scrollDebounce = setTimeout(() => {
+        const images = listEl?.querySelectorAll('img.post-image[src*="Loading"]');
+        if (!images || images.length === 0) return;
+        
+        let triggered = 0;
+        images.forEach(img => {
+          if (triggered >= 5) return; // Limit per scroll event
+          const rect = img.getBoundingClientRect();
+          if (rect.top < tab.window.innerHeight + 200 && rect.bottom > -200) {
+            if (img.dataset.imageUrl && img.dataset.imageKey) {
+              triggered++;
+              const imageUrl = img.dataset.imageUrl;
+              const imageKey = img.dataset.imageKey;
+              img.src = IMAGE_PLACEHOLDER_DATA_URL.replace('Loading...', 'Fetching...');
+              
+              downloadImage(imageUrl, imageKey, pageLog)
+                .then(record => {
+                  if (record && record.url) {
+                    img.src = record.url;
+                    triggerLayout();
+                  }
+                })
+                .catch(() => {
+                  img.src = IMAGE_ERROR_DATA_URL;
+                });
+            }
+          }
+        });
+      }, 150);
+    });
 
     // ---------------------------------------------------------------
     // LAZY IMAGE LOADING WITH INTERSECTION OBSERVER
@@ -2390,12 +2536,20 @@
     function setupImageObserver() {
       if (imageObserver) return imageObserver;
       
+      pageLog("IMAGE_OBSERVER_SETUP", { timestamp: new Date().toISOString() });
+      
       // Create observer with proper error isolation
       imageObserver = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
           // Wrap in try-catch for improved error isolation
           try {
             if (!entry.isIntersecting) return;
+            
+            pageLog("IMAGE_OBSERVER_TRIGGERED", { 
+              key: entry.target.dataset?.imageKey,
+              isIntersecting: entry.isIntersecting,
+              intersectionRatio: entry.intersectionRatio
+            });
             
             const img = entry.target;
             const imageUrl = img.dataset.imageUrl;
@@ -2501,6 +2655,8 @@
       const limited = entries.slice(0, currentRenderCount);
       const downloadedImages = getImagesCache();
       const observer = setupImageObserver();
+      let observedImageCount = 0;
+      let cachedImageCount = 0;
 
       listEl.innerHTML = "";
       limited.forEach(entry => {
@@ -2574,10 +2730,12 @@
               // Update lastAccessed for LRU tracking
               downloadedImages[image.key].lastAccessed = Date.now();
               img.src = downloadedImages[image.key].url;
+              cachedImageCount++;
             } else {
               // Use placeholder and let IntersectionObserver handle download
               img.src = IMAGE_PLACEHOLDER_DATA_URL;
               observer.observe(img);
+              observedImageCount++;
             }
 
             img.onclick = () => {
@@ -2617,8 +2775,54 @@
         listEl.appendChild(item);
       });
       
+      // Log image stats for debugging
+      pageLog("RENDER_IMAGE_STATS", {
+        totalPosts: limited.length,
+        cachedImages: cachedImageCount,
+        observedImages: observedImageCount,
+        observerActive: !!observer
+      });
+      
       // Run initial layout after DOM insertion
       triggerLayout();
+      
+      // WORKAROUND: IntersectionObserver doesn't work reliably in about:blank popups
+      // Manually trigger downloads for images visible in initial viewport
+      setTimeout(() => {
+        const visibleImages = listEl.querySelectorAll('img.post-image[src*="Loading"]');
+        let manualTriggerCount = 0;
+        visibleImages.forEach((img, index) => {
+          // Only process first batch to avoid overwhelming
+          if (index < 20 && img.dataset.imageUrl && img.dataset.imageKey) {
+            const rect = img.getBoundingClientRect();
+            // Check if image is in viewport (with margin)
+            if (rect.top < tab.window.innerHeight + 500) {
+              observer.unobserve(img);
+              manualTriggerCount++;
+              
+              const imageUrl = img.dataset.imageUrl;
+              const imageKey = img.dataset.imageKey;
+              
+              downloadImage(imageUrl, imageKey, pageLog)
+                .then(record => {
+                  if (record && record.url) {
+                    img.src = record.url;
+                    triggerLayout();
+                  }
+                })
+                .catch(() => {
+                  img.src = IMAGE_ERROR_DATA_URL;
+                });
+            }
+          }
+        });
+        if (manualTriggerCount > 0) {
+          pageLog("MANUAL_IMAGE_TRIGGER", { 
+            triggered: manualTriggerCount, 
+            reason: "IntersectionObserver workaround for popup" 
+          });
+        }
+      }, 500);
     }
 
     // ---------------------------------------------------------------
@@ -2691,12 +2895,64 @@
       });
     }
 
-    tab.window.refreshAll = function refreshAll() {
+    tab.window.refreshAll = async function refreshAll() {
       if (manualRefreshInProgress) {
         setStatus("Manual refresh already running...");
         pageLog("MANUAL_REFRESH_SKIPPED", { reason: "already_running" });
         return;
       }
+
+      // Disable refresh button immediately
+      const refreshBtn = doc.getElementById('refresh-all-btn');
+      if (refreshBtn) {
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = '🔍 Checking...';
+      }
+
+      // Run pre-flight checks before starting refresh
+      pageLog("PREFLIGHT_CHECK_START", { timestamp: new Date().toISOString() });
+      setStatus("Running pre-flight checks...");
+
+      // Check 1: GM API Health
+      const gmHealth = await testGMApiHealth(pageLog);
+      if (!gmHealth.working) {
+        pageLog("PREFLIGHT_CHECK_FAILED", { 
+          reason: "GM API not responding",
+          details: gmHealth
+        });
+        setStatus("Error: GM_xmlhttpRequest not working. Try reloading the page or reinstalling Tampermonkey.");
+        if (refreshBtn) {
+          refreshBtn.disabled = false;
+          refreshBtn.textContent = '🔄 Refresh All';
+        }
+        return;
+      }
+
+      // Check 2: Weibo Login Status
+      const loginStatus = await checkWeiboLogin(pageLog);
+      if (!loginStatus.loggedIn) {
+        pageLog("PREFLIGHT_CHECK_FAILED", { 
+          reason: "Not logged into Weibo",
+          details: loginStatus
+        });
+        setStatus("Error: Please log into weibo.com first, then try again.");
+        if (refreshBtn) {
+          refreshBtn.disabled = false;
+          refreshBtn.textContent = '🔄 Refresh All';
+        }
+        // Open Weibo login page in new tab
+        if (confirm("You need to log into Weibo first. Open weibo.com now?")) {
+          window.open("https://weibo.com", "_blank");
+        }
+        return;
+      }
+
+      pageLog("PREFLIGHT_CHECK_COMPLETE", { 
+        gmApiWorking: true,
+        gmResponseTime: gmHealth.duration,
+        weiboLoggedIn: true,
+        weiboUid: loginStatus.uid
+      });
 
       const refreshStartTime = Date.now();
       manualRefreshInProgress = true;
@@ -2731,10 +2987,8 @@
         pageLog("MANUAL_REFRESH_START", { accounts: currentUsers.length });
       }
       
-      // Disable refresh button during process
-      const refreshBtn = doc.getElementById('refresh-all-btn');
+      // Update button text (already disabled in pre-flight section)
       if (refreshBtn) {
-        refreshBtn.disabled = true;
         refreshBtn.textContent = '🔄 Refreshing...';
       }
       
@@ -3193,7 +3447,13 @@
     };
 
     // Initial render
+    pageLog("INITIAL_RENDER_START", { 
+      entries: Object.keys(timeline).length,
+      imageDownloadsPaused,
+      imageProcessingDeferred
+    });
     renderTimeline();
+    pageLog("INITIAL_RENDER_COMPLETE", { timestamp: new Date().toISOString() });
 
     // ---------------------------------------------------------------
     // PROCESS ONE UID (now self-contained, errors won't kill loop)
