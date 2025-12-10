@@ -2419,7 +2419,8 @@
         'BACKGROUND_QUEUE_INITIATED': { type: 'info', icon: '📥' },
         'BACKGROUND_QUEUE_ERROR': { type: 'error', icon: '✕' },
         'IDB_INIT_ERROR': { type: 'error', icon: '💾' },
-        'IDB_RESTORE_RERENDER': { type: 'info', icon: '🔄' },
+        'IDB_CACHE_LOADED': { type: 'success', icon: '💾' },
+        'CACHE_POST_APPLY': { type: 'info', icon: '🖼' },
         'INIT_ASYNC_START': { type: 'debug', icon: '▶' },
         'INIT_ASYNC_RUNNING': { type: 'debug', icon: '▶' },
         'INIT_SCHEDULING_QUEUE': { type: 'debug', icon: '⏱' },
@@ -2763,23 +2764,52 @@
       storedEntries: Object.keys(timeline).length
     });
     
-    // Initialize: Load IDB cache, then queue remaining images
+    // Initialize: Load IDB cache FIRST, then render, then queue remaining images
     pageLog("INIT_ASYNC_START", { timestamp: new Date().toISOString() });
     (async () => {
       pageLog("INIT_ASYNC_RUNNING", { timestamp: new Date().toISOString() });
+      
+      // Step 1: Load IDB cache into memory
+      let restored = 0;
       try {
         const stats = await getIDBCacheStats();
         pageLog("IDB_CACHE_STATS", { cachedImages: stats.count });
         
-        const restored = await loadCachedImagesFromIDB();
-        
-        // Re-render to show cached images
-        if (restored > 0) {
-          renderTimeline();
-          pageLog("IDB_RESTORE_RERENDER", { restored });
-        }
+        restored = await loadCachedImagesFromIDB();
+        pageLog("IDB_CACHE_LOADED", { restored, memoryCacheSize: Object.keys(getImagesCache()).length });
       } catch (idbError) {
         pageLog("IDB_INIT_ERROR", { error: idbError.message || String(idbError) });
+      }
+      
+      // Step 2: Now do initial render (with cached images in memory)
+      const cacheSize = Object.keys(getImagesCache()).length;
+      pageLog("INITIAL_RENDER_START", { 
+        entries: Object.keys(timeline).length,
+        cachedImages: cacheSize,
+        imageDownloadsPaused,
+        imageProcessingDeferred
+      });
+      renderTimeline();
+      pageLog("INITIAL_RENDER_COMPLETE", { timestamp: new Date().toISOString() });
+      
+      // Step 2.5: Apply any cached images that weren't rendered properly
+      if (cacheSize > 0) {
+        tab.window.setTimeout(() => {
+          const cache = getImagesCache();
+          const loadingImages = listEl.querySelectorAll('img.post-image[src*="Loading"]');
+          let applied = 0;
+          loadingImages.forEach(img => {
+            const key = img.dataset.imageKey;
+            if (key && cache[key] && cache[key].url) {
+              img.src = cache[key].url;
+              applied++;
+            }
+          });
+          if (applied > 0) {
+            pageLog("CACHE_POST_APPLY", { applied, totalLoading: loadingImages.length });
+            triggerLayout();
+          }
+        }, 500);
       }
       
       pageLog("INIT_SCHEDULING_QUEUE", { delayMs: 2000 });
@@ -2790,8 +2820,12 @@
         try {
           const queued = queueAllImagesForBackground();
           pageLog("BACKGROUND_QUEUE_INITIATED", { queued });
+          if (queued === 0) {
+            setStatus("Ready. All images cached.");
+          }
         } catch (queueError) {
           pageLog("BACKGROUND_QUEUE_ERROR", { error: queueError.message || String(queueError) });
+          setStatus("Ready. (Background queue error)");
         }
       }, 2000);
     })();
@@ -3753,14 +3787,9 @@
       renderTimeline(); // Re-render with higher limit
     };
 
-    // Initial render
-    pageLog("INITIAL_RENDER_START", { 
-      entries: Object.keys(timeline).length,
-      imageDownloadsPaused,
-      imageProcessingDeferred
-    });
-    renderTimeline();
-    pageLog("INITIAL_RENDER_COMPLETE", { timestamp: new Date().toISOString() });
+    // Initial render moved to after IDB cache load - see INIT_ASYNC block above
+    // Show placeholder status until async init completes
+    setStatus("Initializing...");
 
     // ---------------------------------------------------------------
     // PROCESS ONE UID (now self-contained, errors won't kill loop)
