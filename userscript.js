@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.5.0)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v5.0.0)
 // @namespace    http://tampermonkey.net/
-// @version      4.5.0
+// @version      5.0.0
 // @description  Enhanced Weibo timeline: v4.5.0 adds persistent IndexedDB image cache (7-day retention) and background image downloading - all images queue automatically on open. v4.4.3 adds pre-flight checks for GM API health and Weibo login status before refresh to diagnose silent request failures. v4.4.2 fixes network diagnostic failure on weibo.com by using GM_xmlhttpRequest. v4.4.1 fixes image loading in popup (self-contained data URL dashboard), resolves scope issues with lazy loading/observer, unblocks manual refresh hangs via improved error isolation and popup injection. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
@@ -56,7 +56,7 @@
   let currentRenderCount = PAGE_SIZE;
 
   // Image download controls
-  const IMAGE_DOWNLOAD_CONCURRENCY = 3;
+  const IMAGE_DOWNLOAD_CONCURRENCY = 6; // Increased for faster background caching
   const IMAGE_DOWNLOAD_FAILSAFE_MS = 30000;
   const IMAGE_PLACEHOLDER_DATA_URL =
     "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23f0f0f0'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.3em' fill='%23999' font-size='12'%3ELoading...%3C/text%3E%3C/svg%3E";
@@ -446,6 +446,24 @@
 
   // Run cleanup every 2 minutes
   setInterval(cleanupStaleDownloads, 120000);
+  
+  // Watchdog: Detect and fix stuck download queue
+  let lastQueueProgress = { time: Date.now(), completed: 0 };
+  setInterval(() => {
+    const now = Date.now();
+    const timeSinceLastProgress = now - lastQueueProgress.time;
+    
+    // If queue has items but no progress in 60 seconds, force reset
+    if (imageDownloadQueue.length > 0 && activeImageDownloads >= IMAGE_DOWNLOAD_CONCURRENCY && timeSinceLastProgress > 60000) {
+      console.warn("[WeiboTimeline] WATCHDOG: Queue appears stuck, resetting activeImageDownloads");
+      activeImageDownloads = 0;
+      processImageDownloadQueue();
+    }
+  }, 30000); // Check every 30 seconds
+  
+  // Track progress for watchdog
+  const originalProcessQueue = processImageDownloadQueue;
+  // Note: Progress is tracked via IMAGE_FINALIZED logs updating lastQueueProgress
 
   // Network connectivity diagnostics
   function getNetworkDiagnostics() {
@@ -650,6 +668,7 @@
 
       const duration = Date.now() - startTime;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
+      lastQueueProgress = { time: Date.now(), completed: lastQueueProgress.completed + 1 };
       console.log("[WeiboTimeline] IMAGE_FINALIZED", {
         key,
         attempt,
@@ -682,6 +701,7 @@
       
       const duration = Date.now() - startTime;
       activeImageDownloads = Math.max(0, activeImageDownloads - 1);
+      lastQueueProgress = { time: Date.now(), completed: lastQueueProgress.completed + 1 };
       
       // Enhanced network diagnostics
       const networkInfo = getNetworkDiagnostics();
@@ -2396,6 +2416,18 @@
         'BACKGROUND_QUEUE_STARTED': { type: 'info', icon: '📥' },
         'BACKGROUND_QUEUE_COMPLETE': { type: 'success', icon: '✓' },
         'BACKGROUND_QUEUE_SKIPPED': { type: 'info', icon: '⏭' },
+        'BACKGROUND_QUEUE_INITIATED': { type: 'info', icon: '📥' },
+        'BACKGROUND_QUEUE_ERROR': { type: 'error', icon: '✕' },
+        'IDB_INIT_ERROR': { type: 'error', icon: '💾' },
+        'IDB_RESTORE_RERENDER': { type: 'info', icon: '🔄' },
+        'INIT_ASYNC_START': { type: 'debug', icon: '▶' },
+        'INIT_ASYNC_RUNNING': { type: 'debug', icon: '▶' },
+        'INIT_SCHEDULING_QUEUE': { type: 'debug', icon: '⏱' },
+        'INIT_QUEUE_TIMEOUT_FIRED': { type: 'info', icon: '🔔' },
+        'BACKGROUND_QUEUE_SCANNING': { type: 'debug', icon: '🔍' },
+        'BACKGROUND_QUEUE_SCAN_INFO': { type: 'debug', icon: '📊' },
+        'BACKGROUND_QUEUE_SCAN_RESULT': { type: 'info', icon: '📊' },
+        'BACKGROUND_QUEUE_DRIP_DONE': { type: 'info', icon: '📥' },
         'CONTAINER_ATTEMPT': { type: 'debug', icon: '→' },
         'CONTAINER_SUCCESS': { type: 'success', icon: '✓' },
         'CONTAINER_EMPTY': { type: 'warning', icon: '∅' },
@@ -2633,12 +2665,22 @@
     }
     
     function queueAllImagesForBackground() {
+      pageLog("BACKGROUND_QUEUE_SCANNING", { timestamp: new Date().toISOString() });
+      
       const entries = Object.values(timeline);
       const cache = getImagesCache();
       const imagesToQueue = [];
       
+      pageLog("BACKGROUND_QUEUE_SCAN_INFO", { 
+        entriesCount: entries.length,
+        cacheSize: Object.keys(cache).length,
+        failedCount: failedImageDownloads.size
+      });
+      
+      let totalImagesInEntries = 0;
       entries.forEach(entry => {
         if (entry.images && entry.images.length > 0) {
+          totalImagesInEntries += entry.images.length;
           entry.images.forEach(image => {
             if (image.url && image.key && !cache[image.key] && !failedImageDownloads.has(image.key)) {
               imagesToQueue.push({ url: image.url, key: image.key });
@@ -2647,8 +2689,14 @@
         }
       });
       
+      pageLog("BACKGROUND_QUEUE_SCAN_RESULT", { 
+        totalImagesInEntries,
+        imagesToQueue: imagesToQueue.length,
+        alreadyCached: totalImagesInEntries - imagesToQueue.length
+      });
+      
       if (imagesToQueue.length === 0) {
-        pageLog("BACKGROUND_QUEUE_SKIPPED", { reason: "all_cached" });
+        pageLog("BACKGROUND_QUEUE_SKIPPED", { reason: "all_cached", totalImages: totalImagesInEntries });
         return 0;
       }
       
@@ -2663,17 +2711,31 @@
       
       updateBackgroundStatus();
       
-      // Drip-feed images to queue (one every 300ms)
+      // Drip-feed images to queue (one every 50ms)
       let index = 0;
-      const drip = setInterval(() => {
-        if (index >= imagesToQueue.length) {
-          clearInterval(drip);
+      let queueingDone = false;
+      
+      function checkAllComplete() {
+        if (queueingDone && backgroundCompleted >= backgroundTotal) {
           backgroundRunning = false;
           pageLog("BACKGROUND_QUEUE_COMPLETE", { 
             completed: backgroundCompleted,
             total: backgroundTotal
           });
           setStatus(`Image caching complete: ${backgroundCompleted} images`);
+        }
+      }
+      
+      const drip = tab.window.setInterval(() => {
+        if (index >= imagesToQueue.length) {
+          tab.window.clearInterval(drip);
+          queueingDone = true;
+          pageLog("BACKGROUND_QUEUE_DRIP_DONE", { 
+            queued: index,
+            downloaded: backgroundCompleted,
+            remaining: backgroundTotal - backgroundCompleted
+          });
+          checkAllComplete();
           return;
         }
         
@@ -2684,12 +2746,14 @@
           .then(() => {
             backgroundCompleted++;
             updateBackgroundStatus();
+            checkAllComplete();
           })
           .catch(() => {
             backgroundCompleted++;
             updateBackgroundStatus();
+            checkAllComplete();
           });
-      }, 300); // Add one image to queue every 300ms
+      }, 50); // Add one image to queue every 50ms (20/sec)
       
       return imagesToQueue.length;
     }
@@ -2700,21 +2764,36 @@
     });
     
     // Initialize: Load IDB cache, then queue remaining images
+    pageLog("INIT_ASYNC_START", { timestamp: new Date().toISOString() });
     (async () => {
-      const stats = await getIDBCacheStats();
-      pageLog("IDB_CACHE_STATS", { cachedImages: stats.count });
-      
-      const restored = await loadCachedImagesFromIDB();
-      
-      // Re-render to show cached images
-      if (restored > 0) {
-        renderTimeline();
+      pageLog("INIT_ASYNC_RUNNING", { timestamp: new Date().toISOString() });
+      try {
+        const stats = await getIDBCacheStats();
+        pageLog("IDB_CACHE_STATS", { cachedImages: stats.count });
+        
+        const restored = await loadCachedImagesFromIDB();
+        
+        // Re-render to show cached images
+        if (restored > 0) {
+          renderTimeline();
+          pageLog("IDB_RESTORE_RERENDER", { restored });
+        }
+      } catch (idbError) {
+        pageLog("IDB_INIT_ERROR", { error: idbError.message || String(idbError) });
       }
       
-      // Queue all uncached images for background download
-      setTimeout(() => {
-        queueAllImagesForBackground();
-      }, 1000);
+      pageLog("INIT_SCHEDULING_QUEUE", { delayMs: 2000 });
+      // Queue all uncached images for background download (with delay)
+      // Use tab.window.setTimeout to ensure it runs in popup context
+      tab.window.setTimeout(() => {
+        pageLog("INIT_QUEUE_TIMEOUT_FIRED", { timestamp: new Date().toISOString() });
+        try {
+          const queued = queueAllImagesForBackground();
+          pageLog("BACKGROUND_QUEUE_INITIATED", { queued });
+        } catch (queueError) {
+          pageLog("BACKGROUND_QUEUE_ERROR", { error: queueError.message || String(queueError) });
+        }
+      }, 2000);
     })();
 
     // ---------------------------------------------------------------
@@ -2777,40 +2856,7 @@
     // Attach resize listener to the popup window
     tab.window.addEventListener('resize', triggerLayout);
     
-    // WORKAROUND: Add scroll listener as fallback for IntersectionObserver
-    let scrollDebounce = null;
-    tab.window.addEventListener('scroll', () => {
-      if (scrollDebounce) clearTimeout(scrollDebounce);
-      scrollDebounce = setTimeout(() => {
-        const images = listEl?.querySelectorAll('img.post-image[src*="Loading"]');
-        if (!images || images.length === 0) return;
-        
-        let triggered = 0;
-        images.forEach(img => {
-          if (triggered >= 5) return; // Limit per scroll event
-          const rect = img.getBoundingClientRect();
-          if (rect.top < tab.window.innerHeight + 200 && rect.bottom > -200) {
-            if (img.dataset.imageUrl && img.dataset.imageKey) {
-              triggered++;
-              const imageUrl = img.dataset.imageUrl;
-              const imageKey = img.dataset.imageKey;
-              img.src = IMAGE_PLACEHOLDER_DATA_URL.replace('Loading...', 'Fetching...');
-              
-              downloadImage(imageUrl, imageKey, pageLog)
-                .then(record => {
-                  if (record && record.url) {
-                    img.src = record.url;
-                    triggerLayout();
-                  }
-                })
-                .catch(() => {
-                  img.src = IMAGE_ERROR_DATA_URL;
-                });
-            }
-          }
-        });
-      }, 150);
-    });
+    // Note: Scroll-based image loading disabled - background queue handles all images now
 
     // ---------------------------------------------------------------
     // LAZY IMAGE LOADING WITH INTERSECTION OBSERVER
@@ -3083,43 +3129,7 @@
       // Run initial layout after DOM insertion
       triggerLayout();
       
-      // WORKAROUND: IntersectionObserver doesn't work reliably in about:blank popups
-      // Manually trigger downloads for images visible in initial viewport
-      setTimeout(() => {
-        const visibleImages = listEl.querySelectorAll('img.post-image[src*="Loading"]');
-        let manualTriggerCount = 0;
-        visibleImages.forEach((img, index) => {
-          // Only process first batch to avoid overwhelming
-          if (index < 20 && img.dataset.imageUrl && img.dataset.imageKey) {
-            const rect = img.getBoundingClientRect();
-            // Check if image is in viewport (with margin)
-            if (rect.top < tab.window.innerHeight + 500) {
-              observer.unobserve(img);
-              manualTriggerCount++;
-              
-              const imageUrl = img.dataset.imageUrl;
-              const imageKey = img.dataset.imageKey;
-              
-              downloadImage(imageUrl, imageKey, pageLog)
-                .then(record => {
-                  if (record && record.url) {
-                    img.src = record.url;
-                    triggerLayout();
-                  }
-                })
-                .catch(() => {
-                  img.src = IMAGE_ERROR_DATA_URL;
-                });
-            }
-          }
-        });
-        if (manualTriggerCount > 0) {
-          pageLog("MANUAL_IMAGE_TRIGGER", { 
-            triggered: manualTriggerCount, 
-            reason: "IntersectionObserver workaround for popup" 
-          });
-        }
-      }, 500);
+      // Note: Manual image trigger removed - background queue handles all images now
     }
 
     // ---------------------------------------------------------------
