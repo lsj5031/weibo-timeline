@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.4.3)
+// @name         Weibo Timeline (Manual Refresh, Enhanced UI • v4.5.0)
 // @namespace    http://tampermonkey.net/
-// @version      4.4.3
-// @description  Enhanced Weibo timeline: v4.4.3 adds pre-flight checks for GM API health and Weibo login status before refresh to diagnose silent request failures. v4.4.2 fixes network diagnostic failure on weibo.com by using GM_xmlhttpRequest. v4.4.1 fixes image loading in popup (self-contained data URL dashboard), resolves scope issues with lazy loading/observer, unblocks manual refresh hangs via improved error isolation and popup injection. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
+// @version      4.5.0
+// @description  Enhanced Weibo timeline: v4.5.0 adds persistent IndexedDB image cache (7-day retention) and background image downloading - all images queue automatically on open. v4.4.3 adds pre-flight checks for GM API health and Weibo login status before refresh to diagnose silent request failures. v4.4.2 fixes network diagnostic failure on weibo.com by using GM_xmlhttpRequest. v4.4.1 fixes image loading in popup (self-contained data URL dashboard), resolves scope issues with lazy loading/observer, unblocks manual refresh hangs via improved error isolation and popup injection. Includes ghost response timeout fixes, improved retry logic (auto-retry on hangs), random jitter in request spacing, increased delay between accounts (10s), and enhanced timeout handling (25s hard abort). Dual containerid fallback, blob URL cleanup, retweet support, video thumbnails, progress tracking. Manual refresh with retry logic, editable UIDs, image support with concurrency control, improved masonry layout, theme modes (Visionary/Creative/Momentum/Legacy), robust request handling, local archive with visual content.
 // @author       Grok
 // @match        *://*/*
 // @grant        GM_registerMenuCommand
@@ -67,6 +67,7 @@
   let manualRefreshInProgress = false;
   let lastRefreshTime = null;
   let deferRenderingDuringRefresh = false;
+  let popupDocument = null; // Reference to popup document for background image updates
 
   // UID health tracking
   const HEALTH_VALID = 'valid';
@@ -175,9 +176,149 @@
   const activeBlobUrls = new Set();
   const PENDING_DOWNLOAD_TIMEOUT_MS = 45000; // 45 seconds timeout for stuck pending downloads
   const FAILED_IMAGE_RETRY_COOLDOWN = 300000; // 5 minutes before retrying failed images
-  const IMAGE_CACHE_VALIDITY_MS = 3600000; // 1 hour cache validity
-  const IMAGE_CACHE_SOFT_LIMIT = 500; // Maximum blobs to keep in memory
-  // 3. Ensure the cache object exists
+  const IMAGE_CACHE_VALIDITY_MS = 7 * 24 * 3600000; // 7 days cache validity (persistent)
+  const IMAGE_CACHE_SOFT_LIMIT = 2000; // Increased limit for persistent cache
+  
+  // -------------------------------------------------------------------
+  // INDEXEDDB PERSISTENT IMAGE CACHE
+  // -------------------------------------------------------------------
+  const IDB_NAME = 'WeiboTimelineImages';
+  const IDB_VERSION = 1;
+  const IDB_STORE = 'images';
+  let idbDatabase = null;
+  let idbReady = false;
+  
+  function openImageDB() {
+    return new Promise((resolve, reject) => {
+      if (idbDatabase) {
+        resolve(idbDatabase);
+        return;
+      }
+      
+      const request = indexedDB.open(IDB_NAME, IDB_VERSION);
+      
+      request.onerror = () => {
+        console.error('[WeiboTimeline] IndexedDB open error:', request.error);
+        reject(request.error);
+      };
+      
+      request.onsuccess = () => {
+        idbDatabase = request.result;
+        idbReady = true;
+        console.log('[WeiboTimeline] IndexedDB opened successfully');
+        resolve(idbDatabase);
+      };
+      
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          const store = db.createObjectStore(IDB_STORE, { keyPath: 'key' });
+          store.createIndex('downloadedAt', 'downloadedAt', { unique: false });
+          console.log('[WeiboTimeline] IndexedDB store created');
+        }
+      };
+    });
+  }
+  
+  async function saveImageToIDB(key, blob, originalUrl) {
+    try {
+      const db = await openImageDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_STORE);
+        
+        const record = {
+          key,
+          blob,
+          originalUrl,
+          downloadedAt: Date.now(),
+          lastAccessed: Date.now()
+        };
+        
+        const request = store.put(record);
+        request.onsuccess = () => resolve(true);
+        request.onerror = () => reject(request.error);
+      });
+    } catch (e) {
+      console.error('[WeiboTimeline] saveImageToIDB error:', e);
+      return false;
+    }
+  }
+  
+  async function getImageFromIDB(key) {
+    try {
+      const db = await openImageDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const store = tx.objectStore(IDB_STORE);
+        const request = store.get(key);
+        
+        request.onsuccess = () => {
+          const record = request.result;
+          if (record && record.blob) {
+            // Check if still valid
+            const age = Date.now() - record.downloadedAt;
+            if (age < IMAGE_CACHE_VALIDITY_MS) {
+              resolve(record);
+            } else {
+              resolve(null); // Expired
+            }
+          } else {
+            resolve(null);
+          }
+        };
+        request.onerror = () => reject(request.error);
+      });
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  async function loadAllImagesFromIDB() {
+    try {
+      const db = await openImageDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const store = tx.objectStore(IDB_STORE);
+        const request = store.getAll();
+        
+        request.onsuccess = () => {
+          const records = request.result || [];
+          const validRecords = records.filter(r => {
+            const age = Date.now() - r.downloadedAt;
+            return age < IMAGE_CACHE_VALIDITY_MS;
+          });
+          resolve(validRecords);
+        };
+        request.onerror = () => reject(request.error);
+      });
+    } catch (e) {
+      console.error('[WeiboTimeline] loadAllImagesFromIDB error:', e);
+      return [];
+    }
+  }
+  
+  async function getIDBCacheStats() {
+    try {
+      const db = await openImageDB();
+      return new Promise((resolve) => {
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const store = tx.objectStore(IDB_STORE);
+        const countReq = store.count();
+        countReq.onsuccess = () => resolve({ count: countReq.result });
+        countReq.onerror = () => resolve({ count: 0 });
+      });
+    } catch (e) {
+      return { count: 0 };
+    }
+  }
+  
+  // Initialize IndexedDB on script load
+  openImageDB().catch(e => console.warn('[WeiboTimeline] IndexedDB init failed:', e));
+  
+  // -------------------------------------------------------------------
+  // MEMORY CACHE (with IndexedDB backing)
+  // -------------------------------------------------------------------
   let imagesCache = null;
   function getImagesCache() {
     if (!imagesCache) {
@@ -662,6 +803,26 @@
                 mimeType: response.response.type
               };
               cache[key] = record;
+              
+              // Save to IndexedDB for persistent cache
+              saveImageToIDB(key, response.response, url).catch(e => {
+                console.warn('[WeiboTimeline] Failed to save image to IDB:', key, e);
+              });
+              
+              // Update any DOM elements waiting for this image (background download support)
+              try {
+                if (popupDocument) {
+                  const imgElements = popupDocument.querySelectorAll(`img[data-image-key="${key}"]`);
+                  imgElements.forEach(img => {
+                    if (img.src.includes('Loading') || img.src.includes('data:image/svg')) {
+                      img.src = blobUrl;
+                    }
+                  });
+                }
+              } catch (domErr) {
+                // Ignore DOM errors (popup may be closed)
+              }
+              
               finalize(true);
               resolve(record);
             } catch (e) {
@@ -1288,6 +1449,7 @@
     }
 
     const doc = tab.document;
+    popupDocument = doc; // Store reference for background image updates
     let currentUsers = loadUsers();
     
     // Prompt to add UIDs if empty
@@ -2228,6 +2390,12 @@
         'INITIAL_RENDER_COMPLETE': { type: 'success', icon: '✓' },
         'RENDER_IMAGE_STATS': { type: 'info', icon: '📊' },
         'MANUAL_IMAGE_TRIGGER': { type: 'info', icon: '🖼' },
+        'IDB_CACHE_STATS': { type: 'info', icon: '💾' },
+        'IDB_CACHE_RESTORED': { type: 'success', icon: '💾' },
+        'IDB_CACHE_RESTORE_ERROR': { type: 'error', icon: '💾' },
+        'BACKGROUND_QUEUE_STARTED': { type: 'info', icon: '📥' },
+        'BACKGROUND_QUEUE_COMPLETE': { type: 'success', icon: '✓' },
+        'BACKGROUND_QUEUE_SKIPPED': { type: 'info', icon: '⏭' },
         'CONTAINER_ATTEMPT': { type: 'debug', icon: '→' },
         'CONTAINER_SUCCESS': { type: 'success', icon: '✓' },
         'CONTAINER_EMPTY': { type: 'warning', icon: '∅' },
@@ -2415,10 +2583,139 @@
 
     updateUidStatus();
     updateSubtitle();
+    
+    // Load cached images from IndexedDB into memory
+    async function loadCachedImagesFromIDB() {
+      try {
+        const records = await loadAllImagesFromIDB();
+        const cache = getImagesCache();
+        let restored = 0;
+        
+        for (const record of records) {
+          if (record.blob && record.key && !cache[record.key]) {
+            const blobUrl = URL.createObjectURL(record.blob);
+            activeBlobUrls.add(blobUrl);
+            cache[record.key] = {
+              url: blobUrl,
+              originalUrl: record.originalUrl,
+              downloadedAt: record.downloadedAt,
+              lastAccessed: Date.now(),
+              size: record.blob.size,
+              mimeType: record.blob.type,
+              fromIDB: true
+            };
+            restored++;
+          }
+        }
+        
+        pageLog("IDB_CACHE_RESTORED", { 
+          restored, 
+          totalInIDB: records.length,
+          memoryCacheSize: Object.keys(cache).length
+        });
+        return restored;
+      } catch (e) {
+        pageLog("IDB_CACHE_RESTORE_ERROR", { error: e.message });
+        return 0;
+      }
+    }
+    
+    // Queue uncached images for background download (drip-feed approach)
+    let backgroundTotal = 0;
+    let backgroundCompleted = 0;
+    let backgroundRunning = false;
+    
+    function updateBackgroundStatus() {
+      if (backgroundTotal > 0 && backgroundRunning) {
+        const percent = Math.round((backgroundCompleted / backgroundTotal) * 100);
+        setStatus(`Caching images: ${backgroundCompleted}/${backgroundTotal} (${percent}%)`);
+      }
+    }
+    
+    function queueAllImagesForBackground() {
+      const entries = Object.values(timeline);
+      const cache = getImagesCache();
+      const imagesToQueue = [];
+      
+      entries.forEach(entry => {
+        if (entry.images && entry.images.length > 0) {
+          entry.images.forEach(image => {
+            if (image.url && image.key && !cache[image.key] && !failedImageDownloads.has(image.key)) {
+              imagesToQueue.push({ url: image.url, key: image.key });
+            }
+          });
+        }
+      });
+      
+      if (imagesToQueue.length === 0) {
+        pageLog("BACKGROUND_QUEUE_SKIPPED", { reason: "all_cached" });
+        return 0;
+      }
+      
+      backgroundTotal = imagesToQueue.length;
+      backgroundCompleted = 0;
+      backgroundRunning = true;
+      
+      pageLog("BACKGROUND_QUEUE_STARTED", { 
+        total: imagesToQueue.length,
+        method: "drip-feed"
+      });
+      
+      updateBackgroundStatus();
+      
+      // Drip-feed images to queue (one every 300ms)
+      let index = 0;
+      const drip = setInterval(() => {
+        if (index >= imagesToQueue.length) {
+          clearInterval(drip);
+          backgroundRunning = false;
+          pageLog("BACKGROUND_QUEUE_COMPLETE", { 
+            completed: backgroundCompleted,
+            total: backgroundTotal
+          });
+          setStatus(`Image caching complete: ${backgroundCompleted} images`);
+          return;
+        }
+        
+        const { url, key } = imagesToQueue[index];
+        index++;
+        
+        downloadImage(url, key, null)
+          .then(() => {
+            backgroundCompleted++;
+            updateBackgroundStatus();
+          })
+          .catch(() => {
+            backgroundCompleted++;
+            updateBackgroundStatus();
+          });
+      }, 300); // Add one image to queue every 300ms
+      
+      return imagesToQueue.length;
+    }
+    
     pageLog("Dashboard opened", {
       accounts: currentUsers.length,
       storedEntries: Object.keys(timeline).length
     });
+    
+    // Initialize: Load IDB cache, then queue remaining images
+    (async () => {
+      const stats = await getIDBCacheStats();
+      pageLog("IDB_CACHE_STATS", { cachedImages: stats.count });
+      
+      const restored = await loadCachedImagesFromIDB();
+      
+      // Re-render to show cached images
+      if (restored > 0) {
+        renderTimeline();
+      }
+      
+      // Queue all uncached images for background download
+      setTimeout(() => {
+        queueAllImagesForBackground();
+      }, 1000);
+    })();
 
     // ---------------------------------------------------------------
     // MASONRY LAYOUT ENGINE
